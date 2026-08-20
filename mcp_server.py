@@ -20,10 +20,12 @@ mcp = FastMCP(
     json_response=True,
     transport_security=transport_security,
     instructions=(
-        "Read-only German legal research MVP. Discovery results are not evidence. "
-        "Use get_norm to open current official statutory text. Use trace_norm_amendments "
-        "for provision-specific amendment-history requests and respect coverage_status: "
-        "only complete permits a definitive latest-amendment assertion."
+        "Read-only German legal research service. Discovery results are not evidence. "
+        "Use get_norm for current official statutory text. Use trace_norm_amendments for "
+        "provision-specific amendment-history requests and respect its coverage limits. "
+        "After a concrete official document or amendment candidate is identified, use "
+        "get_official_document_text to open the exact official PDF/HTML passage before "
+        "asserting a concrete amendment command."
     ),
 )
 service = LegalResearchService()
@@ -73,7 +75,30 @@ async def trace_norm_amendments(
     """Trace amendments affecting one statutory provision over a date window.
 
     A definitive 'latest amendment' is permitted only when coverage_status=complete
-    and latest_verified_amendment is populated. partial/unknown requires abstention or
-    narrower wording. Whole-statute amendment headers are discovery leads only.
+    and latest_verified_amendment is populated. partial/unknown requires narrower
+    wording or independent official fallback evidence. Whole-statute amendment headers
+    are discovery leads only.
     """
     return await service.trace_norm_amendments(law, section, from_date, to_date, include_non_changes)
+
+
+@mcp.tool()
+async def get_official_document_text(
+    url: str | None = None,
+    document_id: str | None = None,
+    locator: str | None = None,
+    query: str | None = None,
+    max_passages: int = 3,
+    context_chars: int = 1400,
+) -> dict:
+    """Open an identified official German legal PDF/HTML document and return exact passages.
+
+    Use this after discovery/candidate lock when a concrete official document must be
+    verified, especially an amending act. Provide either an allowlisted official HTTPS
+    URL or a supported document_id such as 'BR-Drs. 5/26', 'BT-Drs. 21/3343', or
+    'BGBl. 2026 I Nr. 33'. Use locator to narrow the document (for example 'Artikel 30')
+    and query for the exact phrase that must be verified (for example
+    '§ 8b Absatz 6 Satz 2'). A query match returns page-aware full_checked evidence;
+    a locator-only result does not prove the requested amendment command.
+    """
+    return await service.get_official_document_text(url, document_id, locator, query, max_passages, context_chars)

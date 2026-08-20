@@ -1,27 +1,79 @@
-# Legal Research MCP MVP 0.1-dev - Render Free
+# Legal Research MCP MVP 0.2-dev - Render Free
 
-Render-ready connectivity MVP for the planned `legal-tax-advisor-de` v2.3.0 research layer.
+Render-ready read-only research MCP for the planned `legal-tax-advisor-de` v2.3.0 research layer.
 
-## What it does now
+## What 0.2-dev adds
 
-- `search_primary_sources`: controlled discovery for a small validated registry (KStG, EStG, AO, GewStG). Discovery only.
-- `get_norm`: retrieves the current official consolidated provision from `gesetze-im-internet.de` and returns structure/evidence metadata.
-- `trace_norm_amendments`: safe connectivity implementation. It may expose a whole-statute amendment header as a discovery lead, but deliberately returns `partial/unknown` and never sets `latest_verified_amendment` until a provision-specific resolver exists.
+0.2-dev keeps the conservative 0.1 amendment-history contract and adds one targeted retrieval capability:
 
-This last behavior is intentional: it prevents the RC2/RC3 class of false "latest amendment" assertions.
+- `get_official_document_text`: opens an already identified official German PDF/HTML document from a strict HTTPS host allowlist, searches a locator/query, and returns page-aware evidence with content hashes.
+
+This closes the D1 gap observed in Copilot Studio: the agent could identify Bundesrat-Drucksache 5/26 but could not open Art. 30 Nr. 1 to verify the concrete amendment command.
+
+## Tools
+
+### `search_primary_sources`
+Controlled discovery for a small validated legislation registry (KStG, EStG, AO, GewStG). Discovery only.
+
+### `get_norm`
+Retrieves the current official consolidated provision from `gesetze-im-internet.de` and returns structure/evidence metadata.
+
+### `trace_norm_amendments`
+Safe amendment-history connectivity implementation. It may expose a whole-statute amendment header as a discovery lead but deliberately remains `partial/unknown` until a provision-specific chain resolver is implemented.
+
+### `get_official_document_text`
+Opens an identified official document and retrieves an exact passage.
+
+Accepted inputs:
+
+- one of `url` or `document_id`;
+- `locator` and/or `query`;
+- optional `max_passages` and `context_chars`.
+
+Supported document-id shortcuts:
+
+- `BR-Drs. 5/26` -> Bundesrat document server PDF;
+- `BT-Drs. 21/3343` -> Bundestag document server PDF;
+- `BGBl. 2026 I Nr. 33` -> official `recht.bund.de` promulgation page.
+
+Example amendment verification target:
+
+```text
+get_official_document_text(
+  document_id="BR-Drs. 5/26",
+  locator="Artikel 30",
+  query="§ 8b Absatz 6 Satz 2"
+)
+```
+
+A successful normalized query match returns `coverage_status=complete` and `full_checked` passage evidence. A locator-only result is navigation evidence and must not be treated as proof of the requested amendment phrase.
+
+## SSRF / download safety
+
+`get_official_document_text` is deliberately constrained:
+
+- HTTPS only;
+- exact official-host allowlist;
+- every redirect hop is revalidated;
+- credentials and non-standard ports are rejected;
+- download size capped at 20 MB;
+- PDF text extraction only, no JavaScript/browser execution;
+- read-only requests only.
+
+Current allowlisted families include the official Bundestag/Bundesrat document server, `recht.bund.de`, `gesetze-im-internet.de`, Bundestag/Bundesrat web hosts, and the Federal Ministry of Finance website.
 
 ## Render deployment
 
-Use the included `render.yaml` Blueprint. The service is configured as:
+Use the included `render.yaml` Blueprint. The service remains configured as:
 
-- Web Service
-- Docker runtime
-- Free plan
-- Frankfurt region
-- `/health` health check
-- dynamic binding to Render's `PORT`
-- MCP endpoint at `/mcp`
-- explicit Host allowlisting from `RENDER_EXTERNAL_HOSTNAME`
+- Web Service;
+- Docker runtime;
+- Free plan;
+- Frankfurt region;
+- `/health` health check;
+- dynamic binding to Render's `PORT`;
+- MCP endpoint at `/mcp`;
+- explicit Host allowlisting from `RENDER_EXTERNAL_HOSTNAME`.
 
 Detailed steps: `docs/render-free-deploy.md`.
 
@@ -31,7 +83,7 @@ Detailed steps: `docs/render-free-deploy.md`.
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -q
+python -m pytest -q
 uvicorn app:app --reload --port 8080
 ```
 
@@ -40,21 +92,27 @@ Local endpoints:
 - Health: `http://localhost:8080/health`
 - MCP: `http://localhost:8080/mcp`
 
-## Not implemented yet
+## Still not implemented
 
-- historical statutory versions;
-- provision-specific amendment-chain resolution;
-- Bundesgesetzblatt / recht.bund.de adapter;
-- Bundestag/Bundesrat legislative-material adapter;
-- case law and BMF guidance;
+- historical statutory version resolver;
+- complete provision-specific amendment-chain resolver;
+- automatic discovery of every Bundesgesetzblatt/Bundestag/Bundesrat document;
+- case-law retrieval;
+- comprehensive BMF guidance retrieval;
 - production authentication.
 
 ## DEV security boundary
 
-The first Render deployment is intentionally unauthenticated to isolate protocol/connectivity testing. It is a DEV proof of concept only. Do not publish the Copilot agent and do not send confidential client/matter facts through the endpoint.
+The Render Free deployment remains intentionally unauthenticated for DEV testing. Do not publish the Copilot agent and do not send confidential client/matter facts through the endpoint.
 
-Free Render Web Services spin down after 15 minutes of inactivity and are not intended for production use.
+Free Render Web Services can spin down after inactivity and are not a production target.
 
-## Copilot Studio handshake
+## 0.1 -> 0.2 upgrade
 
-Keep the existing v2.2.3 skill unchanged until the Render MCP endpoint is live and the three tools have been exercised successfully in Activity Trace.
+1. Replace the repository files with this package and commit/push to the branch Render deploys.
+2. Wait for the Render deployment to become Live.
+3. Verify `/health` returns version `0.2.0-dev`.
+4. In Copilot Studio, open the existing `Legal Research DE` MCP server configuration and verify that `get_official_document_text` is exposed/enabled.
+5. Run the D1 amendment retrieval test and inspect Activity Trace.
+
+See `docs/render-free-deploy.md` for the detailed upgrade/test sequence.
