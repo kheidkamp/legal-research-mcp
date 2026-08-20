@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import httpx
 from bs4 import BeautifulSoup
 
+from . import __version__
 from .models import sha256_text, stable_id
 from .registry import LawEntry
 
@@ -40,7 +41,7 @@ class GesetzeImInternetAdapter:
 
     async def _fetch(self, url: str) -> str:
         headers = {
-            "User-Agent": "LegalResearchMCP/0.1 (+read-only legal research)",
+            "User-Agent": f"LegalResearchMCP/{__version__} (+read-only legal research)",
             "Accept": "text/html,application/xhtml+xml",
         }
         try:

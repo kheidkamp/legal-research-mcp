@@ -4,6 +4,14 @@ import re
 from datetime import date
 
 from .gesetze_im_internet import GesetzeImInternetAdapter, OfficialSourceNotFound, UpstreamUnavailable
+from .official_documents import (
+    OfficialDocumentAdapter,
+    OfficialDocumentNotFound,
+    OfficialDocumentTooLarge,
+    OfficialDocumentUnavailable,
+    UnsafeOfficialDocumentUrl,
+    UnsupportedOfficialDocument,
+)
 from .models import envelope, now_iso, sha256_text, stable_id, today_iso
 from .registry import LAW_REGISTRY, resolve_law
 
@@ -24,8 +32,13 @@ def validate_iso_date(value: str) -> str:
 
 
 class LegalResearchService:
-    def __init__(self, adapter: GesetzeImInternetAdapter | None = None):
+    def __init__(
+        self,
+        adapter: GesetzeImInternetAdapter | None = None,
+        document_adapter: OfficialDocumentAdapter | None = None,
+    ):
         self.adapter = adapter or GesetzeImInternetAdapter()
+        self.document_adapter = document_adapter or OfficialDocumentAdapter()
 
     async def search_primary_sources(
         self,
@@ -204,3 +217,153 @@ class LegalResearchService:
             "Do not make a definitive latest-amendment assertion from this result.",
         ]
         return envelope("partial" if lead else "unavailable", data, warnings)
+
+    async def get_official_document_text(
+        self,
+        url: str | None = None,
+        document_id: str | None = None,
+        locator: str | None = None,
+        query: str | None = None,
+        max_passages: int = 3,
+        context_chars: int = 1400,
+    ) -> dict:
+        if bool(url) == bool(document_id):
+            return envelope(
+                "error",
+                {"document": None, "matches": [], "coverage_status": "unknown"},
+                ["Provide exactly one of url or document_id."],
+            )
+        if not locator and not query:
+            return envelope(
+                "error",
+                {"document": None, "matches": [], "coverage_status": "unknown"},
+                ["Provide locator and/or query so the retrieval remains targeted."],
+            )
+
+        try:
+            requested_url = url or self.document_adapter.resolve_document_id(document_id or "")
+            requested_url = self.document_adapter.validate_official_url(requested_url)
+            parsed = await self.document_adapter.open_document(requested_url)
+        except UnsafeOfficialDocumentUrl as exc:
+            return envelope(
+                "blocked",
+                {"document": None, "matches": [], "coverage_status": "unknown"},
+                [str(exc)],
+            )
+        except ValueError as exc:
+            return envelope(
+                "error",
+                {"document": None, "matches": [], "coverage_status": "unknown"},
+                [str(exc)],
+            )
+        except OfficialDocumentNotFound as exc:
+            return envelope(
+                "not_found",
+                {"document": None, "matches": [], "coverage_status": "unknown"},
+                [str(exc)],
+            )
+        except (OfficialDocumentUnavailable, OfficialDocumentTooLarge, UnsupportedOfficialDocument) as exc:
+            return envelope(
+                "unavailable",
+                {"document": None, "matches": [], "coverage_status": "unknown"},
+                [str(exc)],
+            )
+        except Exception as exc:
+            return envelope(
+                "unavailable",
+                {"document": None, "matches": [], "coverage_status": "unknown"},
+                [f"Official document retrieval failed: {type(exc).__name__}"],
+            )
+
+        matches, locator_found, query_found = self.document_adapter.find_passages(
+            parsed,
+            locator,
+            query,
+            max_passages=max_passages,
+            context_chars=context_chars,
+        )
+
+        if parsed.final_url.startswith("https://dserver.bundestag.de/"):
+            authority = "Deutscher Bundestag / Bundesrat (amtlicher Dokumentenserver)"
+            source_type = "legislative_document"
+        elif "recht.bund.de" in parsed.final_url:
+            authority = "Bundesgesetzblatt / recht.bund.de"
+            source_type = "promulgation"
+        elif "bundesfinanzministerium.de" in parsed.final_url:
+            authority = "Bundesministerium der Finanzen"
+            source_type = "administrative_guidance"
+        elif "gesetze-im-internet.de" in parsed.final_url:
+            authority = "Bundesministerium der Justiz / Bundesamt fuer Justiz"
+            source_type = "legislation"
+        else:
+            authority = "Amtliche deutsche Quelle"
+            source_type = "official_document"
+
+        target_verified = bool(query_found and (locator_found or not locator)) if query else bool(matches and (locator_found or not locator))
+        verification_level = "full_checked" if target_verified else "opened"
+        source_id = stable_id("src", parsed.final_url, parsed.content_hash)
+        source = {
+            "source_id": source_id,
+            "source_type": source_type,
+            "authority": authority,
+            "title": parsed.title,
+            "official_reference": document_id,
+            "document_date": None,
+            "canonical_url": parsed.final_url,
+            "as_of_date": today_iso(),
+            "verification_level": verification_level,
+            "content_hash": parsed.content_hash,
+            "media_type": parsed.media_type,
+            "page_count": parsed.page_count,
+        }
+
+        evidence = []
+        for match in matches:
+            evidence.append(
+                {
+                    "evidence_id": stable_id(
+                        "ev",
+                        source_id,
+                        str(match.get("page")),
+                        match.get("passage_hash") or "",
+                    ),
+                    "source_id": source_id,
+                    "locator": locator,
+                    "page": match.get("page"),
+                    "passage": match.get("passage"),
+                    "verification_level": "full_checked" if (target_verified and match.get("match_type") == "exact_normalized_query") else "opened",
+                    "retrieved_at": now_iso(),
+                    "content_hash": match.get("passage_hash"),
+                    "match_type": match.get("match_type"),
+                }
+            )
+
+        coverage_status = "complete" if target_verified else "partial"
+        warnings = []
+        if locator and not locator_found:
+            warnings.append("The requested locator was not found in the opened official document.")
+        if query and not query_found:
+            warnings.append("The exact normalized query was not found. Any locator-only passage is navigation evidence, not proof of the requested phrase.")
+
+        data = {
+            "document": {
+                "requested_url": requested_url,
+                "document_id": document_id,
+                "title": parsed.title,
+                "canonical_url": parsed.final_url,
+                "media_type": parsed.media_type,
+                "page_count": parsed.page_count,
+                "content_hash": parsed.content_hash,
+                "source": source,
+            },
+            "locator": locator,
+            "query": query,
+            "locator_found": locator_found,
+            "query_found": query_found,
+            "matches": matches,
+            "evidence": evidence,
+            "coverage_status": coverage_status,
+        }
+        status = "ok" if coverage_status == "complete" else "partial"
+        return envelope(status, data, warnings)
+

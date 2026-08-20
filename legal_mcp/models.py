@@ -6,6 +6,8 @@ import uuid
 from datetime import date, datetime, timezone
 from typing import Any
 
+from . import __version__
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -30,7 +32,7 @@ def envelope(status: str, data: dict[str, Any], warnings: list[str] | None = Non
         "request_id": str(uuid.uuid4()),
         "status": status,
         "retrieved_at": now_iso(),
-        "tool_version": "0.1.0-dev",
+        "tool_version": __version__,
         "warnings": warnings or [],
         "data": data,
     }
