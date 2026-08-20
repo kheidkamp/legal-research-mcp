@@ -1,17 +1,37 @@
-# Render Free deployment
+# Render Free deployment and 0.2-dev upgrade
 
-This document deploys the Legal Research MCP connectivity MVP as a free Render Web Service in Frankfurt.
+This document deploys/upgrades the Legal Research MCP DEV service on Render Free in Frankfurt.
 
 ## Security boundary
 
-This deployment is intentionally unauthenticated and is only for DEV connectivity testing with Copilot Studio.
+This deployment is intentionally unauthenticated and is only for DEV connectivity/research testing with Copilot Studio.
 Do not publish the Copilot agent and do not send confidential client or matter facts through this endpoint.
 Free Render services are not intended for production use.
 
-## 1. Put the project in a Git repository
+## Existing 0.1-dev service: upgrade path
 
-Render deploys Git-backed services from GitHub, GitLab, or Bitbucket repositories you connect to your Render account.
-Create a new private repository, copy the contents of this project into the repository root, and push it.
+If `legal-research-mcp-dev` is already connected to the GitHub repository:
+
+1. Replace/add the files from the 0.2-dev package in the repository root.
+2. Commit and push to the branch Render deploys.
+3. Render should start a new deploy automatically.
+4. Wait for status `Live`.
+5. Open:
+
+`https://legal-research-mcp-dev.onrender.com/health`
+
+Expected JSON:
+
+```json
+{"status":"healthy","service":"legal-research-mcp","version":"0.2.0-dev"}
+```
+
+The MCP endpoint remains:
+
+`https://legal-research-mcp-dev.onrender.com/mcp`
+
+## New repository / service path
+
 The repository root must contain at least:
 
 - `render.yaml`
@@ -21,75 +41,49 @@ The repository root must contain at least:
 - `requirements.txt`
 - `legal_mcp/`
 
-Do not commit `.env` files or credentials.
+Recommended path: create/apply the included Render Blueprint.
 
-## 2. Create the Render service
+## DNS-rebinding protection
 
-Recommended path: use the included Blueprint.
+The MCP Python SDK validates the HTTP Host header. This project reads Render's runtime variable `RENDER_EXTERNAL_HOSTNAME` and adds that exact hostname to the MCP allowlist.
 
-1. Sign in to the Render Dashboard.
-2. Create a new Blueprint and connect the repository.
-3. Keep the Blueprint path as `render.yaml`.
-4. Review the planned service:
-   - type: Web Service
-   - runtime: Docker
-   - plan: Free
-   - region: Frankfurt
-   - health check: `/health`
-5. Create/apply the Blueprint.
-
-Render builds the Docker image and starts the service. The Docker container binds to Render's `PORT` environment variable (default `10000`).
-
-## 3. Verify deployment
-
-When the deploy is Live, Render shows the public URL, for example:
-
-`https://legal-research-mcp-dev.onrender.com`
-
-Open:
-
-`https://<your-host>/health`
-
-Expected JSON:
-
-```json
-{"status":"healthy","service":"legal-research-mcp","version":"0.1.0-dev"}
-```
-
-The MCP endpoint is:
-
-`https://<your-host>/mcp`
-
-Do not judge `/mcp` by opening it in a normal browser tab. MCP uses protocol-specific HTTP requests. Test the endpoint from Copilot Studio or an MCP client.
-
-## 4. DNS-rebinding protection
-
-The MCP Python SDK validates the HTTP Host header. This project reads Render's runtime variable `RENDER_EXTERNAL_HOSTNAME` and adds that exact hostname to the MCP allowlist. This avoids a common `421 Misdirected Request / Invalid Host header` failure without disabling DNS-rebinding protection.
-
-If you later attach a custom domain, set this Render environment variable manually:
+If you later attach a custom domain, set:
 
 `MCP_PUBLIC_HOSTNAME=legal-mcp.example.de`
 
-Then redeploy.
+and redeploy.
 
-## 5. Free-instance behavior
+## Copilot Studio after the server update
 
-Render Free Web Services spin down after 15 minutes without inbound traffic. The first request after idle can therefore be slow. This is acceptable for the connectivity proof of concept but is not a production target.
+The MCP server now exposes four tools:
 
-## 6. Next step in Copilot Studio
+- `search_primary_sources`
+- `get_norm`
+- `trace_norm_amendments`
+- `get_official_document_text`
 
-Keep the existing v2.2.3 skill unchanged.
+Open the existing `Legal Research DE` tool in Copilot Studio and verify that the fourth tool is visible and enabled. If the exposed-tool list does not refresh automatically, edit/save the existing MCP server entry so Copilot Studio reconnects and rereads the server tool list.
 
-In the DEV agent:
+If individual MCP tools were selectively enabled rather than `Allow all`, explicitly enable the new tool.
 
-1. Build -> Tools -> Add a tool -> Model Context Protocol (MCP).
-2. Name: `Legal Research DE`.
-3. Server URL: `https://<your-host>/mcp`.
-4. Authentication: None (DEV connectivity test only).
-5. Add the server and verify that these tools appear:
-   - `search_primary_sources`
-   - `get_norm`
-   - `trace_norm_amendments`
-6. In Preview, inspect Activity Trace during the test prompts.
+## D1 verification after 0.2-dev deploy
 
-Only after this succeeds should v2.3.0-alpha1 change the skill/router.
+Start a new Preview chat and run the existing D1 prompt.
+
+In Activity Trace, the desired path is approximately:
+
+```text
+trace_norm_amendments
+  -> candidate identified
+  -> get_official_document_text
+       document_id = BR-Drs. 5/26
+       locator     = Artikel 30
+       query       = § 8b Absatz 6 Satz 2
+  -> final answer
+```
+
+The new tool should return a passage from the official document containing the concrete command that § 8b Absatz 6 Satz 2 is replaced. The agent must still independently close the later amendment period before making a definitive latest-amendment statement.
+
+## Free-instance behavior
+
+Render Free Web Services can spin down after inactivity. The first request after idle can be slow. This is acceptable for the DEV proof of concept.
