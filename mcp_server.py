@@ -84,21 +84,31 @@ async def trace_norm_amendments(
 
 @mcp.tool()
 async def get_official_document_text(
-    url: str | None = None,
-    document_id: str | None = None,
-    locator: str | None = None,
-    query: str | None = None,
-    max_passages: int = 3,
-    context_chars: int = 1400,
+    document_ref: str,
+    locator: str,
+    query: str,
 ) -> dict:
-    """Open an identified official German legal PDF/HTML document and return exact passages.
+    """Open an identified official German legal PDF/HTML document and verify an exact passage.
 
-    Use this after discovery/candidate lock when a concrete official document must be
-    verified, especially an amending act. Provide either an allowlisted official HTTPS
-    URL or a supported document_id such as 'BR-Drs. 5/26', 'BT-Drs. 21/3343', or
-    'BGBl. 2026 I Nr. 33'. Use locator to narrow the document (for example 'Artikel 30')
-    and query for the exact phrase that must be verified (for example
-    '§ 8b Absatz 6 Satz 2'). A query match returns page-aware full_checked evidence;
-    a locator-only result does not prove the requested amendment command.
+    Provide three required strings only. ``document_ref`` is either a supported official
+    document identifier such as ``BR-Drs. 5/26`` / ``BT-Drs. 21/3343`` /
+    ``BGBl. 2026 I Nr. 33`` or an allowlisted official HTTPS URL. ``locator`` narrows the
+    document (for example ``Artikel 30 Nummer 1``) and ``query`` is the exact legal phrase
+    to verify (for example ``§ 8b Absatz 6 Satz 2``). A matching passage returns
+    page-aware full_checked evidence. Do not infer a concrete amendment command when the
+    query is not verified.
     """
-    return await service.get_official_document_text(url, document_id, locator, query, max_passages, context_chars)
+    document_ref = document_ref.strip()
+    locator = locator.strip()
+    query = query.strip()
+    if document_ref.lower().startswith("https://"):
+        return await service.get_official_document_text(
+            url=document_ref,
+            locator=locator,
+            query=query,
+        )
+    return await service.get_official_document_text(
+        document_id=document_ref,
+        locator=locator,
+        query=query,
+    )

@@ -1,14 +1,16 @@
-# Legal Research MCP MVP 0.2-dev - Render Free
+# Legal Research MCP MVP 0.2.1-dev - Render Free
 
 Render-ready read-only research MCP for the planned `legal-tax-advisor-de` v2.3.0 research layer.
 
-## What 0.2-dev adds
+## What 0.2.1-dev changes
 
-0.2-dev keeps the conservative 0.1 amendment-history contract and adds one targeted retrieval capability:
+0.2.1-dev is a Copilot Studio compatibility patch on top of 0.2.0-dev. The official-document retrieval implementation and security boundary are unchanged; only the public MCP input contract is simplified.
 
-- `get_official_document_text`: opens an already identified official German PDF/HTML document from a strict HTTPS host allowlist, searches a locator/query, and returns page-aware evidence with content hashes.
+- `get_official_document_text` now exposes exactly three required string inputs: `document_ref`, `locator`, and `query`.
+- Nullable/union parameters and optional tuning parameters were removed from the public tool schema.
+- `document_ref` accepts either a supported official document identifier or an allowlisted official HTTPS URL; ID-vs-URL resolution happens inside the server.
 
-This closes the D1 gap observed in Copilot Studio: the agent could identify Bundesrat-Drucksache 5/26 but could not open Art. 30 Nr. 1 to verify the concrete amendment command.
+This targets the observed Copilot Studio behavior where 0.2.0-dev displayed the tool in MCP configuration but did not expose it to the Preview orchestrator.
 
 ## Tools
 
@@ -22,15 +24,15 @@ Retrieves the current official consolidated provision from `gesetze-im-internet.
 Safe amendment-history connectivity implementation. It may expose a whole-statute amendment header as a discovery lead but deliberately remains `partial/unknown` until a provision-specific chain resolver is implemented.
 
 ### `get_official_document_text`
-Opens an identified official document and retrieves an exact passage.
+Opens an identified official document and verifies an exact passage.
 
-Accepted inputs:
+Public MCP inputs (all required strings):
 
-- one of `url` or `document_id`;
-- `locator` and/or `query`;
-- optional `max_passages` and `context_chars`.
+- `document_ref`: supported official document ID or allowlisted official HTTPS URL;
+- `locator`: targeted location such as `Artikel 30 Nummer 1`;
+- `query`: exact phrase to verify such as `§ 8b Absatz 6 Satz 2`.
 
-Supported document-id shortcuts:
+Supported document-id shortcuts include:
 
 - `BR-Drs. 5/26` -> Bundesrat document server PDF;
 - `BT-Drs. 21/3343` -> Bundestag document server PDF;
@@ -40,17 +42,33 @@ Example amendment verification target:
 
 ```text
 get_official_document_text(
-  document_id="BR-Drs. 5/26",
-  locator="Artikel 30",
+  document_ref="BR-Drs. 5/26",
+  locator="Artikel 30 Nummer 1",
   query="§ 8b Absatz 6 Satz 2"
 )
 ```
 
 A successful normalized query match returns `coverage_status=complete` and `full_checked` passage evidence. A locator-only result is navigation evidence and must not be treated as proof of the requested amendment phrase.
 
+## Public schema target
+
+The Copilot-facing contract is intentionally simple:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "document_ref": {"type": "string"},
+    "locator": {"type": "string"},
+    "query": {"type": "string"}
+  },
+  "required": ["document_ref", "locator", "query"]
+}
+```
+
 ## SSRF / download safety
 
-`get_official_document_text` is deliberately constrained:
+`get_official_document_text` remains deliberately constrained:
 
 - HTTPS only;
 - exact official-host allowlist;
@@ -107,12 +125,12 @@ The Render Free deployment remains intentionally unauthenticated for DEV testing
 
 Free Render Web Services can spin down after inactivity and are not a production target.
 
-## 0.1 -> 0.2 upgrade
+## 0.2.0 -> 0.2.1 upgrade
 
-1. Replace the repository files with this package and commit/push to the branch Render deploys.
+1. Replace the changed repository files from the 0.2.1-dev patch package and commit/push to the branch Render deploys.
 2. Wait for the Render deployment to become Live.
-3. Verify `/health` returns version `0.2.0-dev`.
-4. In Copilot Studio, open the existing `Legal Research DE` MCP server configuration and verify that `get_official_document_text` is exposed/enabled.
-5. Run the D1 amendment retrieval test and inspect Activity Trace.
+3. Verify `/health` returns version `0.2.1-dev`.
+4. In Copilot Studio, refresh or rebind the existing `Legal Research DE` MCP server and verify that `get_official_document_text` is available in Preview.
+5. Run the direct tool-contract test before the D1 amendment test.
 
-See `docs/render-free-deploy.md` for the detailed upgrade/test sequence.
+See `UPGRADE-0.2.1-DEV.md` and `docs/render-free-deploy.md`.
