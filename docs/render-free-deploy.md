@@ -23,7 +23,7 @@ If `legal-research-mcp-dev` is already connected to the GitHub repository:
 Expected JSON:
 
 ```json
-{"status":"healthy","service":"legal-research-mcp","version":"0.2.0-dev"}
+{"status":"healthy","service":"legal-research-mcp","version":"0.2.1-dev"}
 ```
 
 The MCP endpoint remains:
@@ -66,23 +66,17 @@ Open the existing `Legal Research DE` tool in Copilot Studio and verify that the
 
 If individual MCP tools were selectively enabled rather than `Allow all`, explicitly enable the new tool.
 
-## D1 verification after 0.2-dev deploy
+## Copilot compatibility verification after 0.2.1-dev deploy
 
-Start a new Preview chat and run the existing D1 prompt.
-
-In Activity Trace, the desired path is approximately:
+First run an isolated Preview test that explicitly requests `get_official_document_text`. The desired tool input is:
 
 ```text
-trace_norm_amendments
-  -> candidate identified
-  -> get_official_document_text
-       document_id = BR-Drs. 5/26
-       locator     = Artikel 30
-       query       = § 8b Absatz 6 Satz 2
-  -> final answer
+document_ref = BR-Drs. 5/26
+locator      = Artikel 30 Nummer 1
+query        = § 8b Absatz 6 Satz 2
 ```
 
-The new tool should return a passage from the official document containing the concrete command that § 8b Absatz 6 Satz 2 is replaced. The agent must still independently close the later amendment period before making a definitive latest-amendment statement.
+The Activity Trace must show an actual `get_official_document_text` invocation. Only after that direct contract test passes, rerun D1. The tool should return a passage from the official document containing the concrete command that § 8b Absatz 6 Satz 2 is replaced. The agent must still independently close the later amendment period before making a definitive latest-amendment statement.
 
 ## Free-instance behavior
 
