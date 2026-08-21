@@ -70,7 +70,7 @@ async def test_service_returns_full_checked_amendment_passage():
         query='§ 8b Absatz 6 Satz 2',
     )
     assert result['status'] == 'ok'
-    assert result['tool_version'] == '0.2.0-dev'
+    assert result['tool_version'] == '0.2.1-dev'
     assert result['data']['coverage_status'] == 'complete'
     assert result['data']['query_found'] is True
     assert result['data']['evidence'][0]['verification_level'] == 'full_checked'
