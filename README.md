@@ -1,20 +1,20 @@
-# Legal Research MCP MVP 0.3.0-dev - Render Free
+# Legal Research MCP MVP 0.3.1-dev - Render Free
 
 Render-ready read-only research MCP for the planned `legal-tax-advisor-de` v2.3.0 research layer.
 
-## What 0.3.0-dev changes
+## What 0.3.1-dev changes
 
-0.3.0-dev hardens named BFH case research with a structured evidence gate. The trigger was a
-repeated failure mode in which an agent correctly recognized that an older target decision was
-not available in the official online source but still reconstructed and attributed a supposed
-holding from other material.
+0.3.1-dev is a targeted patch for the positive BFH `get_case` retrieval path. The structured
+fail-closed evidence gate introduced in 0.3.0-dev remains unchanged. The patch fixes a live-search
+problem where an online post-2010 decision could be misclassified as `not_found` because the BFH
+TYPO3/Extbase search form state was not replayed.
 
-- adds public `get_case(court, case_number, decision_date, focus)`;
-- returns a binding machine-readable `content_gate`;
-- pre-2010 BFH target decisions fail closed under the official online coverage limitation;
-- named-case discovery now points explicitly to `get_case`;
-- adds initial official BFH retrieval for 2010+ decisions;
-- retains the existing norm/amendment/document tools and security boundary.
+- opens and serializes the current official BFH search form before submitting;
+- replays hidden `__referrer` / `__trustedProperties` state plus the visible search fields;
+- retries exact case number without date and then quoted case number in `Suchbegriff`;
+- verifies that a no-hit response actually reflects the submitted query;
+- exposes structured search-stage diagnostics;
+- keeps the pre-2010 closed gate and all other Legal Research tools unchanged.
 
 ## Tools
 
@@ -136,13 +136,14 @@ The Render Free deployment remains intentionally unauthenticated for DEV testing
 
 Free Render Web Services can spin down after inactivity and are not a production target.
 
-## 0.2.1 -> 0.3.0 upgrade
+## 0.3.0 -> 0.3.1 upgrade
 
-1. Replace the repository contents with the 0.3.0-dev package and commit/push to the branch Render deploys.
-2. Wait for the Render deployment to become Live.
-3. Verify `/health` returns version `0.3.0-dev`.
-4. In Copilot Studio, refresh or rebind the existing `Legal Research DE` MCP server and verify that the new `get_case` tool is visible in Preview.
-5. Run the direct pre-2010 case-gate test from `UPGRADE-0.3.0-DEV.md`.
-6. Only after that gate is confirmed, update the agent skill so named BFH case research must call `get_case`.
+1. Apply the `0.3.1-dev` repository update and push to the branch Render deploys.
+2. Verify `/health` returns version `0.3.1-dev`.
+3. No agent-skill change is required.
+4. Directly test `get_case` with `BFH`, `IX R 12/22`, `2023-05-03`.
+5. Require an open gate before resuming RC2 release testing.
+6. Re-run `VIII R 10/96`, `1998-07-07` as the negative closed-gate control.
 
-See `UPGRADE-0.3.0-DEV.md`, `docs/case-law-evidence-gate.md`, and `docs/render-free-deploy.md`.
+See `UPGRADE-0.3.1-DEV.md`, `docs/bfh-positive-retrieval.md`, and
+`docs/case-law-evidence-gate.md`.
