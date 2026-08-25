@@ -80,3 +80,41 @@ def test_public_tool_routes_https_url_internally():
         'locator': 'Artikel 30 Nummer 1',
         'query': '§ 8b Absatz 6 Satz 2',
     }]
+
+
+def test_get_case_tool_has_simple_required_string_contract():
+    node = _get_tool_function('get_case')
+    assert [arg.arg for arg in node.args.args] == ['court', 'case_number', 'decision_date', 'focus']
+    assert node.args.defaults == []
+    assert node.args.kwonlyargs == []
+    for arg in node.args.args:
+        assert isinstance(arg.annotation, ast.Name)
+        assert arg.annotation.id == 'str'
+
+
+class _FakeCaseService:
+    def __init__(self):
+        self.calls = []
+
+    async def get_case(self, **kwargs):
+        self.calls.append(kwargs)
+        return {'status': 'partial', 'data': {'content_gate': {'target_case_content_allowed': False}}}
+
+
+def test_public_get_case_routes_exact_required_fields():
+    node = deepcopy(_get_tool_function('get_case'))
+    node.decorator_list = []
+    module = ast.Module(body=[node], type_ignores=[])
+    ast.fix_missing_locations(module)
+    service = _FakeCaseService()
+    namespace = {'service': service}
+    exec(compile(module, 'mcp_server.py', 'exec'), namespace)
+    tool = namespace['get_case']
+    result = asyncio.run(tool(' BFH ', ' VIII R 10/96 ', ' 1998-07-07 ', ' Anteilsveräußerung '))
+    assert result['status'] == 'partial'
+    assert service.calls == [{
+        'court': 'BFH',
+        'case_number': 'VIII R 10/96',
+        'decision_date': '1998-07-07',
+        'focus': 'Anteilsveräußerung',
+    }]

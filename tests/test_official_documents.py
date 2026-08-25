@@ -38,6 +38,13 @@ def test_url_allowlist_blocks_non_official_host():
         OfficialDocumentAdapter.validate_official_url('https://example.com/document.pdf')
 
 
+
+def test_url_allowlist_accepts_bfh_official_host():
+    url = OfficialDocumentAdapter.validate_official_url(
+        'https://www.bundesfinanzhof.de/de/entscheidung/entscheidungen-online/detail/STRE201810036/'
+    )
+    assert url.startswith('https://www.bundesfinanzhof.de/')
+
 def test_url_allowlist_blocks_http():
     with pytest.raises(UnsafeOfficialDocumentUrl):
         OfficialDocumentAdapter.validate_official_url('http://dserver.bundestag.de/brd/2026/0005-26.pdf')
@@ -70,7 +77,7 @@ async def test_service_returns_full_checked_amendment_passage():
         query='§ 8b Absatz 6 Satz 2',
     )
     assert result['status'] == 'ok'
-    assert result['tool_version'] == '0.2.1-dev'
+    assert result['tool_version'] == '0.3.0-dev'
     assert result['data']['coverage_status'] == 'complete'
     assert result['data']['query_found'] is True
     assert result['data']['evidence'][0]['verification_level'] == 'full_checked'
