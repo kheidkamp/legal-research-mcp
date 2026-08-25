@@ -55,7 +55,7 @@ async def test_pre_2010_case_closes_content_gate_without_fetch():
         focus='Anteilsveräußerung Ausschüttung Abwicklung Gestaltungsmissbrauch',
     )
     assert result['status'] == 'partial'
-    assert result['tool_version'] == '0.3.2-dev'
+    assert result['tool_version'] == '0.3.3-dev'
     gate = result['data']['content_gate']
     assert gate['gate_state'] == 'closed'
     assert gate['must_stop_target_case_content'] is True
@@ -257,6 +257,41 @@ async def test_service_reports_definitive_search_no_match_with_diagnostics():
     assert result['data']['content_gate']['reason_code'] == 'TARGET_CASE_NOT_FOUND_IN_OFFICIAL_BFH_ONLINE_RESEARCH'
     assert result['data']['content_gate']['retryable'] is False
     assert result['data']['search_diagnostics']['stage'] == 'exact_match'
+
+
+
+def _bfh_label_discovered_form_html(case_value='', result_row=''):
+    return f"""<!doctype html><html><body>
+    <form method="get" action="/de/entscheidungen/entscheidungen-online/">
+      <input type="hidden" name="tx_eossearch_eossearch[__referrer][@action]" value="index" />
+      <input type="hidden" name="tx_eossearch_eossearch[__trustedProperties]" value="live-trusted-token" />
+      <label for="case-number-live">Aktenzeichen</label>
+      <input id="case-number-live" name="tx_eossearch_eossearch[criteria][fileNumber]" value="{case_value}" />
+      <label for="date-start-live">Entscheidungsdatum von</label>
+      <input id="date-start-live" name="tx_eossearch_eossearch[criteria][dateFrom]" value="" />
+      <input name="tx_eossearch_eossearch[criteria][dateTo]" value="" />
+      <label for="fulltext-live">Suchbegriff</label>
+      <input id="fulltext-live" name="tx_eossearch_eossearch[criteria][query]" value="" />
+      <button type="submit" name="tx_eossearch_eossearch[action]" value="index">Dokument suchen</button>
+    </form>
+    <table>{result_row}</table></body></html>"""
+
+
+@pytest.mark.asyncio
+async def test_label_based_form_discovery_replays_actual_field_names_and_hidden_state():
+    row = """<tr><td>10.08.2023</td><td>V</td><td>IX. Senat</td><td>03.05.2023</td><td>IX R 12/22</td>
+    <td><a href="/de/entscheidung/entscheidungen-online/detail/STRE202310153/">Gewinnerzielungsabsicht</a></td></tr>"""
+    adapter = FixtureBFHSearchAdapter([
+        _bfh_label_discovered_form_html(),
+        _bfh_label_discovered_form_html(case_value='IX R 12/22', result_row=row),
+    ])
+    hits = await adapter.search_exact_case('IX R 12/22', date(2023, 5, 3))
+    assert len(hits) == 1
+    submitted = adapter.requests[1][1]
+    assert submitted['tx_eossearch_eossearch[__trustedProperties]'] == 'live-trusted-token'
+    assert submitted['tx_eossearch_eossearch[criteria][fileNumber]'] == 'IX R 12/22'
+    assert submitted['tx_eossearch_eossearch[criteria][dateFrom]'] == '03.05.2023'
+    assert 'tx_eossearch_eossearch[searchTerms][aktenzeichen]' not in submitted
 
 
 def _bfh_result_only_html(result_row=''):
