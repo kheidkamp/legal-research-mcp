@@ -46,6 +46,8 @@ OFFICIAL_HOSTS = {
     "gesetze-im-internet.de",
     "www.bundesfinanzministerium.de",
     "bundesfinanzministerium.de",
+    "www.bundesfinanzhof.de",
+    "bundesfinanzhof.de",
 }
 
 

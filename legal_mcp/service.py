@@ -4,6 +4,14 @@ import re
 from datetime import date
 
 from .gesetze_im_internet import GesetzeImInternetAdapter, OfficialSourceNotFound, UpstreamUnavailable
+from .bfh_cases import (
+    BFHCaseAdapter,
+    CaseSourceUnavailable,
+    UnsupportedCourt,
+    normalize_case_number,
+    parse_iso_date_or_blank,
+    validate_court,
+)
 from .official_documents import (
     OfficialDocumentAdapter,
     OfficialDocumentNotFound,
@@ -36,9 +44,11 @@ class LegalResearchService:
         self,
         adapter: GesetzeImInternetAdapter | None = None,
         document_adapter: OfficialDocumentAdapter | None = None,
+        case_adapter: BFHCaseAdapter | None = None,
     ):
         self.adapter = adapter or GesetzeImInternetAdapter()
         self.document_adapter = document_adapter or OfficialDocumentAdapter()
+        self.case_adapter = case_adapter or BFHCaseAdapter(document_adapter=self.document_adapter)
 
     async def search_primary_sources(
         self,
@@ -54,40 +64,91 @@ class LegalResearchService:
             validate_iso_date(as_of_date)
         as_of_date = as_of_date or today_iso()
         max_results = min(max(max_results, 1), 20)
-        allowed = set(source_types or ["legislation"])
-        if "legislation" not in allowed:
-            return envelope("not_found", {"results": []}, ["Connectivity MVP currently discovers legislation only."])
+        allowed = set(source_types or ["legislation", "case"])
+        if not allowed.intersection({"legislation", "case"}):
+            return envelope("not_found", {"results": []}, ["The requested source types are not supported by this DEV service."])
 
         q = query.lower()
-        results = []
-        section_match = re.search(r"§\s*(\d+[a-z]?)", query, flags=re.IGNORECASE)
-        section = section_match.group(1).lower() if section_match else None
-        for entry in LAW_REGISTRY.values():
-            needles = [entry.abbreviation.lower(), entry.title.lower()]
-            if not any(n in q for n in needles):
-                continue
-            url = entry.section_url(section) if section else entry.landing_url
-            title = f"{entry.title} ({entry.abbreviation})" + (f" § {section}" if section else "")
-            source_id = stable_id("src", url, title)
+        results: list[dict] = []
+
+        # Named BFH case discovery. This is metadata only; get_case is mandatory before
+        # any substantive target-case attribution.
+        case_match = re.search(
+            r"\b(?P<senate>(?:[IVX]+|GrS))\s+(?P<kind>[A-ZÄÖÜ-]+(?:\s*[A-ZÄÖÜ-]+)?)\s+(?P<number>\d{1,4})\s*/\s*(?P<year>\d{2,4})\b",
+            query,
+            flags=re.IGNORECASE,
+        )
+        if "case" in allowed and case_match and ("bfh" in q or "bundesfinanzhof" in q):
+            raw_case = case_match.group(0)
+            try:
+                case_number = normalize_case_number(raw_case)
+            except ValueError:
+                case_number = re.sub(r"\s+", " ", raw_case.strip())
+            date_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", query)
+            decision_date = None
+            if date_match:
+                decision_date = date_match.group(1)
+            else:
+                german_date = re.search(r"\b(\d{1,2})[.]\s*(\d{1,2})[.]\s*(\d{4})\b", query)
+                if german_date:
+                    try:
+                        decision_date = date(
+                            int(german_date.group(3)),
+                            int(german_date.group(2)),
+                            int(german_date.group(1)),
+                        ).isoformat()
+                    except ValueError:
+                        decision_date = None
+            canonical = self.case_adapter.search_url
             results.append(
                 {
-                    "source_id": source_id,
-                    "source_type": "legislation",
-                    "authority": entry.authority,
-                    "title": title,
-                    "official_reference": None,
-                    "document_date": None,
-                    "canonical_url": url,
-                    "match_summary": "Registry discovery only; open the official source before relying on its content.",
+                    "source_id": stable_id("src", "BFH", case_number, decision_date or ""),
+                    "source_type": "case",
+                    "authority": "Bundesfinanzhof",
+                    "title": f"BFH {case_number}",
+                    "official_reference": case_number,
+                    "document_date": decision_date,
+                    "canonical_url": canonical,
+                    "match_summary": (
+                        "Named-case discovery only. No case proposition is verified. "
+                        "Call get_case; its content_gate is binding before attributing target-case content."
+                    ),
                     "verification_level": "identified",
+                    "required_retrieval_tool": "get_case",
                 }
             )
-            if len(results) >= max_results:
-                break
-        warnings = []
+
+        if "legislation" in allowed:
+            section_match = re.search(r"§\s*(\d+[a-z]?)", query, flags=re.IGNORECASE)
+            section = section_match.group(1).lower() if section_match else None
+            for entry in LAW_REGISTRY.values():
+                needles = [entry.abbreviation.lower(), entry.title.lower()]
+                if not any(n in q for n in needles):
+                    continue
+                url = entry.section_url(section) if section else entry.landing_url
+                title = f"{entry.title} ({entry.abbreviation})" + (f" § {section}" if section else "")
+                source_id = stable_id("src", url, title)
+                results.append(
+                    {
+                        "source_id": source_id,
+                        "source_type": "legislation",
+                        "authority": entry.authority,
+                        "title": title,
+                        "official_reference": None,
+                        "document_date": None,
+                        "canonical_url": url,
+                        "match_summary": "Registry discovery only; open the official source before relying on its content.",
+                        "verification_level": "identified",
+                    }
+                )
+                if len(results) >= max_results:
+                    break
+
+        results = results[:max_results]
+        warnings: list[str] = []
         status = "ok" if results else "not_found"
         if not results:
-            warnings.append("No match in the controlled MVP law registry. This is not a negative legal finding.")
+            warnings.append("No match in the controlled DEV source adapters. This is not a negative legal finding.")
         return envelope(status, {"results": results, "as_of_date": as_of_date}, warnings)
 
     async def get_norm(
@@ -218,6 +279,186 @@ class LegalResearchService:
         ]
         return envelope("partial" if lead else "unavailable", data, warnings)
 
+
+    async def get_case(
+        self,
+        court: str,
+        case_number: str,
+        decision_date: str,
+        focus: str,
+    ) -> dict:
+        """Retrieve one named BFH decision with a machine-readable target-case content gate.
+
+        This method is fail-closed. If the official target decision cannot be opened, the
+        response explicitly forbids downstream attribution of facts, holding, reasons,
+        headnotes, quotations, paraphrases, or legal propositions to the target case.
+        """
+        try:
+            court_norm = validate_court(court)
+            case_norm = normalize_case_number(case_number)
+            date_value = parse_iso_date_or_blank(decision_date)
+        except (ValueError, UnsupportedCourt) as exc:
+            return envelope(
+                "error",
+                {
+                    "case": None,
+                    "input_reference": {
+                        "court": court,
+                        "case_number": case_number,
+                        "decision_date": decision_date or None,
+                    },
+                    "content_gate": BFHCaseAdapter.blocked_gate(
+                        "INVALID_CASE_REQUEST",
+                        BFHCaseAdapter.coverage_object(None),
+                    ),
+                },
+                [str(exc)],
+            )
+
+        coverage = self.case_adapter.coverage_object(date_value)
+        input_reference = self.case_adapter.input_metadata(court_norm, case_norm, date_value)
+        if date_value and date_value < self.case_adapter.coverage_start:
+            gate = self.case_adapter.blocked_gate(
+                "TARGET_DATE_BEFORE_BFH_ONLINE_COVERAGE",
+                coverage,
+                retryable=False,
+            )
+            return envelope(
+                "partial",
+                {
+                    "case": None,
+                    "input_reference": input_reference,
+                    "coverage_status": "partial",
+                    "content_gate": gate,
+                    "recommended_next_source": {
+                        "authority": "Bundesfinanzhof",
+                        "method": "decision-dispatch request for pre-2010 decisions",
+                        "contact": "entscheidungsversand@bfh.bund.de",
+                        "note": "The official BFH online research page directs requests for decisions before 2010 to this service.",
+                    },
+                },
+                [
+                    "The official BFH online decision research covers V/NV decisions since 2010.",
+                    "Target-case content is locked because the official target decision was not opened.",
+                ],
+            )
+
+        try:
+            retrieved = await self.case_adapter.retrieve_case(
+                court=court_norm,
+                case_number=case_norm,
+                decision_date=date_value,
+                focus=focus,
+            )
+        except CaseSourceUnavailable as exc:
+            gate = self.case_adapter.blocked_gate(
+                "OFFICIAL_CASE_SOURCE_UNAVAILABLE",
+                coverage,
+                retryable=True,
+            )
+            return envelope(
+                "unavailable",
+                {
+                    "case": None,
+                    "input_reference": input_reference,
+                    "coverage_status": "unknown",
+                    "content_gate": gate,
+                },
+                [str(exc), "Target-case content is locked because the official target decision was not opened."],
+            )
+        except Exception as exc:
+            gate = self.case_adapter.blocked_gate(
+                "OFFICIAL_CASE_RETRIEVAL_FAILED",
+                coverage,
+                retryable=True,
+            )
+            return envelope(
+                "unavailable",
+                {
+                    "case": None,
+                    "input_reference": input_reference,
+                    "coverage_status": "unknown",
+                    "content_gate": gate,
+                },
+                [f"Official BFH case retrieval failed: {type(exc).__name__}", "Target-case content remains locked."],
+            )
+
+        if retrieved is None:
+            gate = self.case_adapter.blocked_gate(
+                "TARGET_CASE_NOT_FOUND_IN_OFFICIAL_BFH_ONLINE_RESEARCH",
+                coverage,
+                retryable=False,
+            )
+            return envelope(
+                "not_found",
+                {
+                    "case": None,
+                    "input_reference": input_reference,
+                    "coverage_status": "partial",
+                    "content_gate": gate,
+                },
+                [
+                    "No exact official BFH online decision was opened for the supplied case reference.",
+                    "Do not infer target-case content from snippets, secondary sources, or model memory.",
+                ],
+            )
+
+        source_id = stable_id("src", retrieved.canonical_url, retrieved.content_hash)
+        source = {
+            "source_id": source_id,
+            "source_type": "case",
+            "authority": "Bundesfinanzhof",
+            "title": retrieved.title,
+            "official_reference": retrieved.case_number,
+            "document_date": retrieved.decision_date,
+            "canonical_url": retrieved.canonical_url,
+            "as_of_date": today_iso(),
+            "verification_level": "full_checked",
+            "content_hash": retrieved.content_hash,
+        }
+        evidence = []
+        for passage in retrieved.passages:
+            evidence.append(
+                {
+                    "evidence_id": stable_id(
+                        "ev",
+                        source_id,
+                        passage.get("passage_hash") or "",
+                    ),
+                    "source_id": source_id,
+                    "locator": passage.get("locator"),
+                    "page": passage.get("page"),
+                    "passage": passage.get("passage"),
+                    "verification_level": "full_checked",
+                    "retrieved_at": now_iso(),
+                    "content_hash": passage.get("passage_hash"),
+                    "match_type": passage.get("match_type"),
+                    "focus_token_hits": passage.get("focus_token_hits"),
+                }
+            )
+        gate = self.case_adapter.open_gate(source_id, [item["evidence_id"] for item in evidence])
+        case_data = {
+            "court": retrieved.court,
+            "decision_type": retrieved.decision_type,
+            "decision_date": retrieved.decision_date,
+            "case_number": retrieved.case_number,
+            "ecli": retrieved.ecli,
+            "title": retrieved.title,
+            "canonical_url": retrieved.canonical_url,
+            "source": source,
+            "evidence": evidence,
+        }
+        return envelope(
+            "ok",
+            {
+                "case": case_data,
+                "input_reference": input_reference,
+                "coverage_status": "complete",
+                "content_gate": gate,
+            },
+            [],
+        )
+
     async def get_official_document_text(
         self,
         url: str | None = None,
@@ -292,6 +533,9 @@ class LegalResearchService:
         elif "bundesfinanzministerium.de" in parsed.final_url:
             authority = "Bundesministerium der Finanzen"
             source_type = "administrative_guidance"
+        elif "bundesfinanzhof.de" in parsed.final_url:
+            authority = "Bundesfinanzhof"
+            source_type = "case"
         elif "gesetze-im-internet.de" in parsed.final_url:
             authority = "Bundesministerium der Justiz / Bundesamt fuer Justiz"
             source_type = "legislation"
