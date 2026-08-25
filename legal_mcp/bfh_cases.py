@@ -162,8 +162,10 @@ class BFHCaseAdapter:
             "tx_eossearch_eossearch[searchTerms][ecli]": "",
             "tx_eossearch_eossearch[searchTerms][norm]": "",
             "tx_eossearch_eossearch[searchTerms][searchTerm]": fulltext_term or "",
+            "tx_eossearch_eossearch[searchTerms][sorting]": "",
             "tx_eossearch_eossearch[dateRange][start]": "",
             "tx_eossearch_eossearch[dateRange][end]": "",
+            "tx_eossearch_eossearch[action]": "index",
         }
         if decision_date:
             german = decision_date.strftime("%d.%m.%Y")
@@ -339,12 +341,31 @@ class BFHCaseAdapter:
         if decision_date and decision_date < _BFH_COVERAGE_START:
             return []
 
-        # First open the official search page and serialize its current form state.
-        # TYPO3/Extbase may require hidden __referrer/__trustedProperties fields;
-        # submitting only the visible search parameters can silently yield the
-        # unfiltered default result page.
+        # Open the official search page first. Prefer replaying the live TYPO3/Extbase
+        # form state when it can be identified, because hidden trusted-properties
+        # fields may be required. Some production responses, however, expose the
+        # decision list without a parseable form (for example due to edge rendering
+        # or alternate markup). In that situation, do not abort: use a controlled
+        # direct-GET fallback with the official visible field names. An exact official
+        # result hit can open the case gate; an unverifiable no-hit result cannot.
         landing_html, landing_url = await self._fetch_html(self.search_url)
-        form = self._extract_search_form(landing_html, landing_url)
+        form: BFHSearchForm | None = None
+        form_discovery: dict = {"stage": "search_form_discovery", "mode": "live_form"}
+        try:
+            form = self._extract_search_form(landing_html, landing_url)
+        except CaseSourceUnavailable as exc:
+            if exc.reason_code != "BFH_SEARCH_FORM_NOT_FOUND":
+                raise
+            soup = BeautifulSoup(landing_html, "html.parser")
+            form_discovery = {
+                "stage": "search_form_discovery",
+                "mode": "direct_get_fallback",
+                "reason_code": exc.reason_code,
+                "landing_url": landing_url,
+                "form_count": len(soup.find_all("form")),
+                "page_title": soup.title.get_text(" ", strip=True) if soup.title else None,
+                "has_aktenzeichen_text": "aktenzeichen" in soup.get_text(" ", strip=True).casefold(),
+            }
 
         variants: list[tuple[str, str | None, date | None, str | None]] = []
         if decision_date:
@@ -356,10 +377,18 @@ class BFHCaseAdapter:
         variants.append(("quoted_fulltext", None, None, f'"{case_number}"'))
 
         attempts: list[dict] = []
+        any_reflected = False
         for label, case_term, date_term, fulltext_term in variants:
-            params = dict(form.default_params)
+            if form is not None:
+                params = dict(form.default_params)
+                request_url = form.action_url
+                transport = "live_form_replay"
+            else:
+                params = {}
+                request_url = landing_url or self.search_url
+                transport = "direct_get_fallback"
             params.update(self._search_params(case_term, date_term, fulltext_term))
-            html, final_url = await self._fetch_html(form.action_url, params=params)
+            html, final_url = await self._fetch_html(request_url, params=params)
             hits = self.parse_search_results(html, case_number, final_url)
             if decision_date and hits:
                 exact_date = decision_date.isoformat()
@@ -369,9 +398,11 @@ class BFHCaseAdapter:
                 elif any(hit.decision_date for hit in hits):
                     hits = []
             reflected = self._response_reflects_query(html, case_term, fulltext_term)
+            any_reflected = any_reflected or reflected
             attempts.append(
                 {
                     "strategy": label,
+                    "transport": transport,
                     "response_reflected_query": reflected,
                     "exact_hits": len(hits),
                     "response_url": final_url,
@@ -379,12 +410,24 @@ class BFHCaseAdapter:
             )
             if hits:
                 return hits
-            if not reflected:
+            # With a replayed live form, a non-reflected response is strong evidence
+            # that the server ignored the request, so stop immediately. In direct-GET
+            # fallback mode, continue all controlled strategies first because the
+            # alternate markup may not echo the submitted fields even when search is
+            # functioning.
+            if form is not None and not reflected:
                 raise CaseSourceUnavailable(
                     "BFH search response did not reflect the submitted query; the search request may have been ignored or the form contract changed.",
                     reason_code="BFH_SEARCH_RESPONSE_UNEXPECTED",
-                    diagnostics={"stage": "search_submission", "attempts": attempts},
+                    diagnostics={"stage": "search_submission", "form_discovery": form_discovery, "attempts": attempts},
                 )
+
+        if form is None and not any_reflected:
+            raise CaseSourceUnavailable(
+                "BFH search form was not parseable and direct GET fallback produced no exact target hit or reflected query state.",
+                reason_code="BFH_SEARCH_DIRECT_FALLBACK_UNVERIFIED",
+                diagnostics={"stage": "search_submission", "form_discovery": form_discovery, "attempts": attempts},
+            )
 
         raise CaseSourceNotFound(
             "No exact BFH decision matched the supplied case number and decision date after the supported official search strategies.",
@@ -392,6 +435,7 @@ class BFHCaseAdapter:
                 "stage": "exact_match",
                 "case_number": case_number,
                 "decision_date": decision_date.isoformat() if decision_date else None,
+                "form_discovery": form_discovery,
                 "attempts": attempts,
             },
         )
