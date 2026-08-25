@@ -1,3 +1,7 @@
+# Legal Research MCP 0.3.3-dev
+
+0.3.3-dev hardens positive BFH `get_case` retrieval by replaying the actual live decision-search form state using label-based semantic field discovery and preserved cookies. The target-case evidence gate remains fail-closed unless the official target decision is opened.
+
 # Legal Research MCP MVP 0.3.2-dev - Render Free
 
 Render-ready read-only research MCP for the planned `legal-tax-advisor-de` v2.3.0 research layer.
