@@ -1,19 +1,20 @@
-# Legal Research MCP MVP 0.3.1-dev - Render Free
+# Legal Research MCP MVP 0.3.2-dev - Render Free
 
 Render-ready read-only research MCP for the planned `legal-tax-advisor-de` v2.3.0 research layer.
 
-## What 0.3.1-dev changes
+## What 0.3.2-dev changes
 
-0.3.1-dev is a targeted patch for the positive BFH `get_case` retrieval path. The structured
-fail-closed evidence gate introduced in 0.3.0-dev remains unchanged. The patch fixes a live-search
-problem where an online post-2010 decision could be misclassified as `not_found` because the BFH
-TYPO3/Extbase search form state was not replayed.
+0.3.2-dev is a narrow follow-up to the positive BFH `get_case` retrieval patch. The structured
+fail-closed evidence gate introduced in 0.3.0-dev remains unchanged. After deployment of 0.3.1-dev,
+Render showed that the official BFH page could be retrieved without a parseable decision-search
+`<form>`, causing `BFH_SEARCH_FORM_NOT_FOUND` before any search submission.
 
-- opens and serializes the current official BFH search form before submitting;
-- replays hidden `__referrer` / `__trustedProperties` state plus the visible search fields;
-- retries exact case number without date and then quoted case number in `Suchbegriff`;
-- verifies that a no-hit response actually reflects the submitted query;
-- exposes structured search-stage diagnostics;
+- still prefers replaying the live BFH TYPO3/Extbase form state when available;
+- if the search form is not parseable, uses a bounded direct-GET fallback with the official visible field names;
+- tries case number + date, case number only, then quoted case number in `Suchbegriff`;
+- opens the positive path only when an exact official result hit is found;
+- never converts an unverified direct-fallback no-hit into definitive `not_found`;
+- returns structured transport/search diagnostics while preserving the closed evidence gate on failure;
 - keeps the pre-2010 closed gate and all other Legal Research tools unchanged.
 
 ## Tools
@@ -136,14 +137,14 @@ The Render Free deployment remains intentionally unauthenticated for DEV testing
 
 Free Render Web Services can spin down after inactivity and are not a production target.
 
-## 0.3.0 -> 0.3.1 upgrade
+## 0.3.1 -> 0.3.2 upgrade
 
-1. Apply the `0.3.1-dev` repository update and push to the branch Render deploys.
-2. Verify `/health` returns version `0.3.1-dev`.
+1. Apply the `0.3.2-dev` repository update and push to the branch Render deploys.
+2. Verify `/health` returns version `0.3.2-dev`.
 3. No agent-skill change is required.
 4. Directly test `get_case` with `BFH`, `IX R 12/22`, `2023-05-03`.
 5. Require an open gate before resuming RC2 release testing.
 6. Re-run `VIII R 10/96`, `1998-07-07` as the negative closed-gate control.
 
-See `UPGRADE-0.3.1-DEV.md`, `docs/bfh-positive-retrieval.md`, and
+See `UPGRADE-0.3.2-DEV.md`, `docs/bfh-positive-retrieval.md`, and
 `docs/case-law-evidence-gate.md`.
