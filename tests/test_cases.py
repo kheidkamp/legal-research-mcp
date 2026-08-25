@@ -55,7 +55,7 @@ async def test_pre_2010_case_closes_content_gate_without_fetch():
         focus='Anteilsveräußerung Ausschüttung Abwicklung Gestaltungsmissbrauch',
     )
     assert result['status'] == 'partial'
-    assert result['tool_version'] == '0.3.1-dev'
+    assert result['tool_version'] == '0.3.2-dev'
     gate = result['data']['content_gate']
     assert gate['gate_state'] == 'closed'
     assert gate['must_stop_target_case_content'] is True
@@ -257,3 +257,64 @@ async def test_service_reports_definitive_search_no_match_with_diagnostics():
     assert result['data']['content_gate']['reason_code'] == 'TARGET_CASE_NOT_FOUND_IN_OFFICIAL_BFH_ONLINE_RESEARCH'
     assert result['data']['content_gate']['retryable'] is False
     assert result['data']['search_diagnostics']['stage'] == 'exact_match'
+
+
+def _bfh_result_only_html(result_row=''):
+    return f'''<!doctype html><html><head><title>Entscheidungen online</title></head><body>
+    <h2>Dokumentsuche</h2><div>Aktenzeichen</div>
+    <table><tr><th>Veröffentlichung</th><th>V/NV</th><th>Senat</th><th>Entscheidung vom</th><th>Aktenzeichen</th><th>Titel</th></tr>
+    {result_row}
+    </table></body></html>'''
+
+
+@pytest.mark.asyncio
+async def test_missing_search_form_uses_direct_get_fallback_and_accepts_exact_official_hit():
+    row = '''<tr><td>10.08.2023</td><td>V</td><td>IX. Senat</td><td>03.05.2023</td><td>IX R 12/22</td>
+    <td><a href="/de/entscheidung/entscheidungen-online/detail/STRE202310153/">Gewinnerzielungsabsicht</a></td></tr>'''
+    adapter = FixtureBFHSearchAdapter([
+        _bfh_result_only_html(),
+        _bfh_result_only_html(result_row=row),
+    ])
+    hits = await adapter.search_exact_case('IX R 12/22', date(2023, 5, 3))
+    assert len(hits) == 1
+    assert hits[0].decision_date == '2023-05-03'
+    assert hits[0].canonical_url.endswith('/STRE202310153/')
+    submitted = adapter.requests[1][1]
+    assert submitted['tx_eossearch_eossearch[searchTerms][aktenzeichen]'] == 'IX R 12/22'
+    assert submitted['tx_eossearch_eossearch[action]'] == 'index'
+
+
+@pytest.mark.asyncio
+async def test_missing_search_form_without_exact_hit_remains_retryable_unavailable():
+    adapter = FixtureBFHSearchAdapter([
+        _bfh_result_only_html(),
+        _bfh_result_only_html(),
+        _bfh_result_only_html(),
+        _bfh_result_only_html(),
+    ])
+    with pytest.raises(CaseSourceUnavailable) as excinfo:
+        await adapter.search_exact_case('IX R 12/22', date(2023, 5, 3))
+    exc = excinfo.value
+    assert exc.reason_code == 'BFH_SEARCH_DIRECT_FALLBACK_UNVERIFIED'
+    diagnostics = exc.diagnostics
+    assert diagnostics['stage'] == 'search_submission'
+    assert diagnostics['form_discovery']['mode'] == 'direct_get_fallback'
+    assert len(diagnostics['attempts']) == 3
+    assert all(attempt['transport'] == 'direct_get_fallback' for attempt in diagnostics['attempts'])
+
+
+@pytest.mark.asyncio
+async def test_service_reports_direct_get_fallback_unverified_as_retryable_unavailable():
+    adapter = RaisingCaseAdapter(CaseSourceUnavailable(
+        'direct fallback unverified',
+        reason_code='BFH_SEARCH_DIRECT_FALLBACK_UNVERIFIED',
+        diagnostics={'stage': 'search_submission', 'form_discovery': {'mode': 'direct_get_fallback'}},
+    ))
+    result = await LegalResearchService(case_adapter=adapter).get_case(
+        court='BFH', case_number='IX R 12/22', decision_date='2023-05-03', focus='Gestaltungsmissbrauch'
+    )
+    assert result['status'] == 'unavailable'
+    assert result['data']['content_gate']['gate_state'] == 'closed'
+    assert result['data']['content_gate']['reason_code'] == 'BFH_SEARCH_DIRECT_FALLBACK_UNVERIFIED'
+    assert result['data']['content_gate']['retryable'] is True
+    assert result['data']['search_diagnostics']['form_discovery']['mode'] == 'direct_get_fallback'
