@@ -2,7 +2,7 @@
 
 ## Status
 
-This is the interface delta for Legal Research MCP implementation `0.3.0-dev`.
+This is the interface delta for Legal Research MCP implementation `0.3.1-dev`.
 It preserves the v0.1 evidence model and adds a binding machine-readable gate for named BFH
 case content.
 
@@ -95,3 +95,10 @@ case content.
 
 This is a backward-compatible evidence-field addition to the v0.1 interface and therefore a
 minor interface revision.
+
+
+## Additive diagnostic field in 0.3.1-dev
+
+Closed `get_case` responses caused by post-2010 search/retrieval problems may include
+`data.search_diagnostics`. This field is diagnostic only and never opens the target-case content
+gate.

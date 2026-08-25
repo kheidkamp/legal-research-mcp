@@ -1,4 +1,4 @@
-# Official document retrieval contract (0.3.0-dev)
+# Official document retrieval contract (0.3.1-dev)
 
 ## Purpose
 

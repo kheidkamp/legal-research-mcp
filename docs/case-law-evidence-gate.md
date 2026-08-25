@@ -1,4 +1,4 @@
-# BFH case-law evidence gate (0.3.0-dev)
+# BFH case-law evidence gate (0.3.1-dev)
 
 ## Purpose
 
@@ -92,3 +92,11 @@ case = null
 
 The agent must therefore abstain from describing the case's facts, holding, reasons, or
 attributed doctrinal propositions until stronger official evidence is available.
+
+
+## Positive post-2010 retrieval
+
+For an online BFH decision the gate may open only after the official target document itself has
+been opened. `0.3.1-dev` replays the live BFH search-form state and distinguishes a definitive
+no-match from a technically ignored or structurally unexpected search response. See
+`bfh-positive-retrieval.md`.
