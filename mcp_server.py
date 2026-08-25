@@ -23,9 +23,13 @@ mcp = FastMCP(
         "Read-only German legal research service. Discovery results are not evidence. "
         "Use get_norm for current official statutory text. Use trace_norm_amendments for "
         "provision-specific amendment-history requests and respect its coverage limits. "
-        "After a concrete official document or amendment candidate is identified, use "
-        "get_official_document_text to open the exact official PDF/HTML passage before "
-        "asserting a concrete amendment command."
+        "For every named BFH decision, call get_case before attributing any facts, holding, "
+        "reasons, headnotes, quotations, paraphrases, or legal propositions to that decision. "
+        "The get_case data.content_gate is binding: when target_case_content_allowed=false, "
+        "do not generate target-case content from memory, knowledge search, snippets, secondary "
+        "sources, later decisions, or the user prompt. After a concrete official document or "
+        "amendment candidate is identified, use get_official_document_text to open the exact "
+        "official PDF/HTML passage before asserting a concrete amendment command."
     ),
 )
 service = LegalResearchService()
@@ -80,6 +84,35 @@ async def trace_norm_amendments(
     are discovery leads only.
     """
     return await service.trace_norm_amendments(law, section, from_date, to_date, include_non_changes)
+
+
+@mcp.tool()
+async def get_case(
+    court: str,
+    case_number: str,
+    decision_date: str,
+    focus: str,
+) -> dict:
+    """Retrieve one named BFH decision and return a binding target-case evidence gate.
+
+    MANDATORY for substantive claims about a named BFH decision. All four inputs are
+    required strings for Copilot Studio compatibility. Use ISO YYYY-MM-DD for
+    ``decision_date`` (or an empty string if genuinely unknown) and describe the legal
+    issue in ``focus``.
+
+    The response contains ``data.content_gate.target_case_content_allowed``. If it is
+    false, the downstream agent MUST NOT state, reconstruct, summarize, paraphrase, quote,
+    or attribute any facts, outcome, holding, reasons, headnotes, or legal propositions to
+    the target case, even with caveats such as "sinngemäß", "zugeschrieben" or
+    "rekonstruiert". Other search results, snippets, secondary sources, model memory,
+    later decisions, and the user prompt do not override a closed gate.
+    """
+    return await service.get_case(
+        court=court.strip(),
+        case_number=case_number.strip(),
+        decision_date=decision_date.strip(),
+        focus=focus.strip(),
+    )
 
 
 @mcp.tool()

@@ -1,16 +1,20 @@
-# Legal Research MCP MVP 0.2.1-dev - Render Free
+# Legal Research MCP MVP 0.3.0-dev - Render Free
 
 Render-ready read-only research MCP for the planned `legal-tax-advisor-de` v2.3.0 research layer.
 
-## What 0.2.1-dev changes
+## What 0.3.0-dev changes
 
-0.2.1-dev is a Copilot Studio compatibility patch on top of 0.2.0-dev. The official-document retrieval implementation and security boundary are unchanged; only the public MCP input contract is simplified.
+0.3.0-dev hardens named BFH case research with a structured evidence gate. The trigger was a
+repeated failure mode in which an agent correctly recognized that an older target decision was
+not available in the official online source but still reconstructed and attributed a supposed
+holding from other material.
 
-- `get_official_document_text` now exposes exactly three required string inputs: `document_ref`, `locator`, and `query`.
-- Nullable/union parameters and optional tuning parameters were removed from the public tool schema.
-- `document_ref` accepts either a supported official document identifier or an allowlisted official HTTPS URL; ID-vs-URL resolution happens inside the server.
-
-This targets the observed Copilot Studio behavior where 0.2.0-dev displayed the tool in MCP configuration but did not expose it to the Preview orchestrator.
+- adds public `get_case(court, case_number, decision_date, focus)`;
+- returns a binding machine-readable `content_gate`;
+- pre-2010 BFH target decisions fail closed under the official online coverage limitation;
+- named-case discovery now points explicitly to `get_case`;
+- adds initial official BFH retrieval for 2010+ decisions;
+- retains the existing norm/amendment/document tools and security boundary.
 
 ## Tools
 
@@ -22,6 +26,13 @@ Retrieves the current official consolidated provision from `gesetze-im-internet.
 
 ### `trace_norm_amendments`
 Safe amendment-history connectivity implementation. It may expose a whole-statute amendment header as a discovery lead but deliberately remains `partial/unknown` until a provision-specific chain resolver is implemented.
+
+### `get_case`
+Mandatory target-case retrieval/evidence gate for named BFH decisions. If
+`data.content_gate.target_case_content_allowed=false`, no facts, holding, reasons, headnotes,
+quotes, paraphrases, or attributed legal propositions may be stated about the target case.
+
+See `docs/case-law-evidence-gate.md`.
 
 ### `get_official_document_text`
 Opens an identified official document and verifies an exact passage.
@@ -78,7 +89,7 @@ The Copilot-facing contract is intentionally simple:
 - PDF text extraction only, no JavaScript/browser execution;
 - read-only requests only.
 
-Current allowlisted families include the official Bundestag/Bundesrat document server, `recht.bund.de`, `gesetze-im-internet.de`, Bundestag/Bundesrat web hosts, and the Federal Ministry of Finance website.
+Current allowlisted families include the official Bundestag/Bundesrat document server, `recht.bund.de`, `gesetze-im-internet.de`, Bundestag/Bundesrat web hosts, the Federal Ministry of Finance website, and the Bundesfinanzhof website.
 
 ## Render deployment
 
@@ -115,7 +126,7 @@ Local endpoints:
 - historical statutory version resolver;
 - complete provision-specific amendment-chain resolver;
 - automatic discovery of every Bundesgesetzblatt/Bundestag/Bundesrat document;
-- case-law retrieval;
+- broader multi-court case-law retrieval and citation graph;
 - comprehensive BMF guidance retrieval;
 - production authentication.
 
@@ -125,12 +136,13 @@ The Render Free deployment remains intentionally unauthenticated for DEV testing
 
 Free Render Web Services can spin down after inactivity and are not a production target.
 
-## 0.2.0 -> 0.2.1 upgrade
+## 0.2.1 -> 0.3.0 upgrade
 
-1. Replace the changed repository files from the 0.2.1-dev patch package and commit/push to the branch Render deploys.
+1. Replace the repository contents with the 0.3.0-dev package and commit/push to the branch Render deploys.
 2. Wait for the Render deployment to become Live.
-3. Verify `/health` returns version `0.2.1-dev`.
-4. In Copilot Studio, refresh or rebind the existing `Legal Research DE` MCP server and verify that `get_official_document_text` is available in Preview.
-5. Run the direct tool-contract test before the D1 amendment test.
+3. Verify `/health` returns version `0.3.0-dev`.
+4. In Copilot Studio, refresh or rebind the existing `Legal Research DE` MCP server and verify that the new `get_case` tool is visible in Preview.
+5. Run the direct pre-2010 case-gate test from `UPGRADE-0.3.0-DEV.md`.
+6. Only after that gate is confirmed, update the agent skill so named BFH case research must call `get_case`.
 
-See `UPGRADE-0.2.1-DEV.md` and `docs/render-free-deploy.md`.
+See `UPGRADE-0.3.0-DEV.md`, `docs/case-law-evidence-gate.md`, and `docs/render-free-deploy.md`.
