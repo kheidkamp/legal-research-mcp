@@ -85,6 +85,7 @@ class BFHSearchForm:
     action_url: str
     method: str
     default_params: dict[str, str]
+    field_names: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,9 @@ class BFHCaseAdapter:
     ):
         self.timeout_seconds = timeout_seconds
         self.document_adapter = document_adapter or OfficialDocumentAdapter()
+        # Preserve BFH cookies across landing-page and search submissions. Some
+        # TYPO3/Extbase deployments bind form state to a browser session.
+        self._cookies = httpx.Cookies()
 
     @staticmethod
     def _headers() -> dict[str, str]:
@@ -173,19 +177,123 @@ class BFHCaseAdapter:
             params["tx_eossearch_eossearch[dateRange][end]"] = german
         return params
 
+    @staticmethod
+    def _field_name_from_label(form, label_text: str) -> str | None:
+        wanted = label_text.casefold()
+        for label in form.find_all("label"):
+            text = re.sub(r"\s+", " ", label.get_text(" ", strip=True)).casefold()
+            if wanted not in text:
+                continue
+            target_id = (label.get("for") or "").strip()
+            if target_id:
+                node = form.find(id=target_id)
+                name = (node.get("name") or "").strip() if node else ""
+                if name:
+                    return name
+            node = label.find(["input", "select", "textarea"])
+            name = (node.get("name") or "").strip() if node else ""
+            if name:
+                return name
+        return None
+
     @classmethod
     def _extract_search_form(cls, html: str, base_url: str) -> BFHSearchForm:
         soup = BeautifulSoup(html, "html.parser")
-        target_name = "tx_eossearch_eossearch[searchTerms][aktenzeichen]"
-        for form in soup.find_all("form"):
-            if not form.find(attrs={"name": target_name}):
+        forms = soup.find_all("form")
+        canonical = {
+            "case_number": "tx_eossearch_eossearch[searchTerms][aktenzeichen]",
+            "ecli": "tx_eossearch_eossearch[searchTerms][ecli]",
+            "norm": "tx_eossearch_eossearch[searchTerms][norm]",
+            "fulltext": "tx_eossearch_eossearch[searchTerms][searchTerm]",
+            "sorting": "tx_eossearch_eossearch[searchTerms][sorting]",
+            "date_start": "tx_eossearch_eossearch[dateRange][start]",
+            "date_end": "tx_eossearch_eossearch[dateRange][end]",
+        }
+
+        ranked: list[tuple[int, object, list[str]]] = []
+        for form in forms:
+            names = [
+                (node.get("name") or "").strip()
+                for node in form.find_all(["input", "select", "textarea", "button"])
+                if (node.get("name") or "").strip()
+            ]
+            lowered = [name.casefold() for name in names]
+            text = re.sub(r"\s+", " ", form.get_text(" ", strip=True)).casefold()
+            score = 0
+            if canonical["case_number"] in names:
+                score += 100
+            if any("__trustedproperties" in name for name in lowered):
+                score += 80
+            if any(name.startswith("tx_eossearch_eossearch[") for name in names):
+                score += 60
+            if "aktenzeichen" in text:
+                score += 40
+            if "entscheidungsdatum" in text:
+                score += 20
+            if "dokument suchen" in text:
+                score += 20
+            if score:
+                ranked.append((score, form, names))
+
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        for score, form, names in ranked:
+            field_names: dict[str, str] = {}
+            for semantic, expected in canonical.items():
+                if expected in names:
+                    field_names[semantic] = expected
+
+            # If BFH changes Extbase property names while keeping the visible form,
+            # resolve semantic fields via labels and conservative name fragments.
+            label_map = {
+                "case_number": "aktenzeichen",
+                "ecli": "ecli",
+                "norm": "norm",
+                "date_start": "entscheidungsdatum von",
+                "fulltext": "suchbegriff",
+                "sorting": "sortierung",
+            }
+            for semantic, label in label_map.items():
+                if semantic not in field_names:
+                    found = cls._field_name_from_label(form, label)
+                    if found:
+                        field_names[semantic] = found
+
+            if "date_end" not in field_names:
+                # Prefer a named date field not already used as start.
+                for name in names:
+                    folded = name.casefold()
+                    if "date" in folded and name != field_names.get("date_start"):
+                        if folded.endswith("[end]") or "end" in folded:
+                            field_names["date_end"] = name
+                            break
+
+            if "case_number" not in field_names:
+                for name in names:
+                    if "aktenzeichen" in name.casefold():
+                        field_names["case_number"] = name
+                        break
+
+            if "fulltext" not in field_names:
+                for name in names:
+                    folded = name.casefold()
+                    if "searchterm" in folded or "suchbegriff" in folded:
+                        field_names["fulltext"] = name
+                        break
+
+            if "case_number" not in field_names:
                 continue
+
             method = (form.get("method") or "get").strip().lower()
             if method != "get":
                 raise CaseSourceUnavailable(
                     "BFH decision-search form no longer uses the supported GET method.",
                     reason_code="BFH_SEARCH_FORM_METHOD_UNSUPPORTED",
-                    diagnostics={"stage": "search_form_discovery", "method": method},
+                    diagnostics={
+                        "stage": "search_form_discovery",
+                        "method": method,
+                        "candidate_score": score,
+                        "field_names": field_names,
+                    },
                 )
             action = cls._validate_bfh_url(urljoin(base_url, form.get("action") or base_url))
             params: dict[str, str] = {}
@@ -217,12 +325,53 @@ class BFHCaseAdapter:
                         continue
                     submit_added = True
                     params[name] = node.get("value") or ""
-            return BFHSearchForm(action_url=action, method=method, default_params=params)
+            return BFHSearchForm(
+                action_url=action,
+                method=method,
+                default_params=params,
+                field_names=field_names,
+            )
+
         raise CaseSourceUnavailable(
             "BFH decision-search form could not be identified on the official search page.",
             reason_code="BFH_SEARCH_FORM_NOT_FOUND",
-            diagnostics={"stage": "search_form_discovery"},
+            diagnostics={
+                "stage": "search_form_discovery",
+                "form_count": len(forms),
+                "candidate_scores": [item[0] for item in ranked],
+            },
         )
+
+    @classmethod
+    def _form_search_params(
+        cls,
+        form: BFHSearchForm,
+        case_number: str | None,
+        decision_date: date | None = None,
+        fulltext_term: str | None = None,
+    ) -> dict[str, str]:
+        canonical = cls._search_params(case_number, decision_date, fulltext_term)
+        semantic_to_canonical = {
+            "case_number": "tx_eossearch_eossearch[searchTerms][aktenzeichen]",
+            "ecli": "tx_eossearch_eossearch[searchTerms][ecli]",
+            "norm": "tx_eossearch_eossearch[searchTerms][norm]",
+            "fulltext": "tx_eossearch_eossearch[searchTerms][searchTerm]",
+            "sorting": "tx_eossearch_eossearch[searchTerms][sorting]",
+            "date_start": "tx_eossearch_eossearch[dateRange][start]",
+            "date_end": "tx_eossearch_eossearch[dateRange][end]",
+        }
+        params = dict(form.default_params)
+        for semantic, actual in form.field_names.items():
+            source = semantic_to_canonical.get(semantic)
+            if source is not None:
+                params[actual] = canonical.get(source, "")
+        # Keep the action field only when it already exists in the live form;
+        # adding framework fields not covered by trusted-properties can invalidate
+        # the request.
+        action_key = "tx_eossearch_eossearch[action]"
+        if action_key in params:
+            params[action_key] = canonical[action_key]
+        return params
 
     @staticmethod
     def _response_reflects_query(html: str, case_number: str | None = None, fulltext_term: str | None = None) -> bool:
@@ -262,7 +411,7 @@ class BFHCaseAdapter:
         timeout = httpx.Timeout(self.timeout_seconds)
         current = self._validate_bfh_url(url)
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=self._headers()) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=self._headers(), cookies=self._cookies) as client:
                 first = True
                 for _ in range(6):
                     response = await client.get(current, params=params if first else None)
@@ -279,6 +428,7 @@ class BFHCaseAdapter:
                         raise CaseSourceUnavailable(f"BFH source returned HTTP {response.status_code}.")
                     response.raise_for_status()
                     final_url = self._validate_bfh_url(str(response.url))
+                    self._cookies.update(client.cookies)
                     return response.text, final_url
                 raise CaseSourceUnavailable("BFH source exceeded the redirect limit.")
         except (CaseSourceNotFound, CaseSourceUnavailable):
@@ -380,14 +530,13 @@ class BFHCaseAdapter:
         any_reflected = False
         for label, case_term, date_term, fulltext_term in variants:
             if form is not None:
-                params = dict(form.default_params)
+                params = self._form_search_params(form, case_term, date_term, fulltext_term)
                 request_url = form.action_url
                 transport = "live_form_replay"
             else:
-                params = {}
+                params = self._search_params(case_term, date_term, fulltext_term)
                 request_url = landing_url or self.search_url
                 transport = "direct_get_fallback"
-            params.update(self._search_params(case_term, date_term, fulltext_term))
             html, final_url = await self._fetch_html(request_url, params=params)
             hits = self.parse_search_results(html, case_number, final_url)
             if decision_date and hits:
@@ -406,6 +555,11 @@ class BFHCaseAdapter:
                     "response_reflected_query": reflected,
                     "exact_hits": len(hits),
                     "response_url": final_url,
+                    "form_method": form.method if form is not None else None,
+                    "form_field_names": form.field_names if form is not None else None,
+                    "trusted_properties_present": bool(
+                        form is not None and any("__trustedProperties" in key for key in form.default_params)
+                    ),
                 }
             )
             if hits:
