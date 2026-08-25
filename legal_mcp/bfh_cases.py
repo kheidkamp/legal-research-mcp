@@ -23,11 +23,17 @@ class UnsupportedCourt(ValueError):
 
 
 class CaseSourceUnavailable(RuntimeError):
-    pass
+    def __init__(self, message: str, reason_code: str = "OFFICIAL_CASE_SOURCE_UNAVAILABLE", diagnostics: dict | None = None):
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.diagnostics = diagnostics or {}
 
 
 class CaseSourceNotFound(RuntimeError):
-    pass
+    def __init__(self, message: str, reason_code: str = "TARGET_CASE_NOT_FOUND_IN_OFFICIAL_BFH_ONLINE_RESEARCH", diagnostics: dict | None = None):
+        super().__init__(message)
+        self.reason_code = reason_code
+        self.diagnostics = diagnostics or {}
 
 
 _BFH_HOST = "www.bundesfinanzhof.de"
@@ -72,6 +78,13 @@ def parse_iso_date_or_blank(value: str) -> date | None:
         return date.fromisoformat(text)
     except ValueError as exc:
         raise ValueError("decision_date must be ISO YYYY-MM-DD or an empty string") from exc
+
+
+@dataclass(frozen=True)
+class BFHSearchForm:
+    action_url: str
+    method: str
+    default_params: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -140,17 +153,93 @@ class BFHCaseAdapter:
         }
 
     @staticmethod
-    def _search_params(case_number: str, decision_date: date | None = None, fulltext_term: str | None = None) -> dict[str, str]:
+    def _search_params(case_number: str | None, decision_date: date | None = None, fulltext_term: str | None = None) -> dict[str, str]:
+        # Submit the same visible fields a browser would submit. This matters for
+        # TYPO3/Extbase forms whose hidden trusted-properties state is validated
+        # against the submitted field set.
         params: dict[str, str] = {
-            "tx_eossearch_eossearch[searchTerms][aktenzeichen]": case_number,
+            "tx_eossearch_eossearch[searchTerms][aktenzeichen]": case_number or "",
+            "tx_eossearch_eossearch[searchTerms][ecli]": "",
+            "tx_eossearch_eossearch[searchTerms][norm]": "",
+            "tx_eossearch_eossearch[searchTerms][searchTerm]": fulltext_term or "",
+            "tx_eossearch_eossearch[dateRange][start]": "",
+            "tx_eossearch_eossearch[dateRange][end]": "",
         }
-        if fulltext_term:
-            params["tx_eossearch_eossearch[searchTerms][searchTerm]"] = fulltext_term
         if decision_date:
             german = decision_date.strftime("%d.%m.%Y")
             params["tx_eossearch_eossearch[dateRange][start]"] = german
             params["tx_eossearch_eossearch[dateRange][end]"] = german
         return params
+
+    @classmethod
+    def _extract_search_form(cls, html: str, base_url: str) -> BFHSearchForm:
+        soup = BeautifulSoup(html, "html.parser")
+        target_name = "tx_eossearch_eossearch[searchTerms][aktenzeichen]"
+        for form in soup.find_all("form"):
+            if not form.find(attrs={"name": target_name}):
+                continue
+            method = (form.get("method") or "get").strip().lower()
+            if method != "get":
+                raise CaseSourceUnavailable(
+                    "BFH decision-search form no longer uses the supported GET method.",
+                    reason_code="BFH_SEARCH_FORM_METHOD_UNSUPPORTED",
+                    diagnostics={"stage": "search_form_discovery", "method": method},
+                )
+            action = cls._validate_bfh_url(urljoin(base_url, form.get("action") or base_url))
+            params: dict[str, str] = {}
+            submit_added = False
+            for node in form.find_all(["input", "select", "textarea", "button"]):
+                name = (node.get("name") or "").strip()
+                if not name:
+                    continue
+                tag = node.name.lower()
+                if tag == "input":
+                    input_type = (node.get("type") or "text").lower()
+                    if input_type in {"checkbox", "radio"} and not node.has_attr("checked"):
+                        continue
+                    if input_type in {"file", "reset", "image"}:
+                        continue
+                    if input_type in {"submit", "button"}:
+                        if submit_added:
+                            continue
+                        submit_added = True
+                    params[name] = node.get("value") or ""
+                elif tag == "select":
+                    option = node.find("option", selected=True) or node.find("option")
+                    params[name] = (option.get("value") if option else "") or ""
+                elif tag == "textarea":
+                    params[name] = node.get_text() or ""
+                elif tag == "button":
+                    button_type = (node.get("type") or "submit").lower()
+                    if button_type != "submit" or submit_added:
+                        continue
+                    submit_added = True
+                    params[name] = node.get("value") or ""
+            return BFHSearchForm(action_url=action, method=method, default_params=params)
+        raise CaseSourceUnavailable(
+            "BFH decision-search form could not be identified on the official search page.",
+            reason_code="BFH_SEARCH_FORM_NOT_FOUND",
+            diagnostics={"stage": "search_form_discovery"},
+        )
+
+    @staticmethod
+    def _response_reflects_query(html: str, case_number: str | None = None, fulltext_term: str | None = None) -> bool:
+        soup = BeautifulSoup(html, "html.parser")
+        if case_number:
+            node = soup.find(attrs={"name": "tx_eossearch_eossearch[searchTerms][aktenzeichen]"})
+            value = (node.get("value") if node else "") or ""
+            try:
+                if normalize_case_number(value) == normalize_case_number(case_number):
+                    return True
+            except ValueError:
+                pass
+        if fulltext_term:
+            node = soup.find(attrs={"name": "tx_eossearch_eossearch[searchTerms][searchTerm]"})
+            value = ((node.get("value") if node else "") or "").strip().casefold()
+            expected = fulltext_term.strip().casefold()
+            if value == expected:
+                return True
+        return False
 
     @staticmethod
     def _validate_bfh_url(url: str) -> str:
@@ -205,7 +294,10 @@ class BFHCaseAdapter:
 
         for anchor in soup.find_all("a", href=True):
             href = anchor.get("href") or ""
-            if "/entscheidung/entscheidungen-online/detail/" not in href:
+            # The German and English BFH sites have used slightly different path
+            # spellings over time. The stable part of an official result link is
+            # the STRE identifier on a detail/decision-detail route.
+            if not re.search(r"(?:detail|decision-detail)/STRE\d+/?", href, re.IGNORECASE):
                 continue
             container = anchor.find_parent("tr") or anchor.find_parent("article") or anchor.find_parent("li") or anchor.parent
             text = re.sub(r"\s+", " ", container.get_text(" ", strip=True) if container else anchor.get_text(" ", strip=True))
@@ -246,13 +338,63 @@ class BFHCaseAdapter:
         case_number = normalize_case_number(case_number)
         if decision_date and decision_date < _BFH_COVERAGE_START:
             return []
-        html, final_url = await self._fetch_html(self.search_url, params=self._search_params(case_number, decision_date))
-        hits = self.parse_search_results(html, case_number, final_url)
-        if not hits and decision_date:
-            # One controlled fallback: exact case number without date filter.
-            html, final_url = await self._fetch_html(self.search_url, params=self._search_params(case_number, None))
+
+        # First open the official search page and serialize its current form state.
+        # TYPO3/Extbase may require hidden __referrer/__trustedProperties fields;
+        # submitting only the visible search parameters can silently yield the
+        # unfiltered default result page.
+        landing_html, landing_url = await self._fetch_html(self.search_url)
+        form = self._extract_search_form(landing_html, landing_url)
+
+        variants: list[tuple[str, str | None, date | None, str | None]] = []
+        if decision_date:
+            variants.append(("aktenzeichen_plus_date", case_number, decision_date, None))
+        variants.append(("aktenzeichen_only", case_number, None, None))
+        # BFH's own search guidance recommends putting an unfound file number in
+        # quotation marks in the full-text field. Use this as one controlled final
+        # fallback, never as evidence by itself.
+        variants.append(("quoted_fulltext", None, None, f'"{case_number}"'))
+
+        attempts: list[dict] = []
+        for label, case_term, date_term, fulltext_term in variants:
+            params = dict(form.default_params)
+            params.update(self._search_params(case_term, date_term, fulltext_term))
+            html, final_url = await self._fetch_html(form.action_url, params=params)
             hits = self.parse_search_results(html, case_number, final_url)
-        return hits
+            if decision_date and hits:
+                exact_date = decision_date.isoformat()
+                dated_hits = [hit for hit in hits if hit.decision_date == exact_date]
+                if dated_hits:
+                    hits = dated_hits
+                elif any(hit.decision_date for hit in hits):
+                    hits = []
+            reflected = self._response_reflects_query(html, case_term, fulltext_term)
+            attempts.append(
+                {
+                    "strategy": label,
+                    "response_reflected_query": reflected,
+                    "exact_hits": len(hits),
+                    "response_url": final_url,
+                }
+            )
+            if hits:
+                return hits
+            if not reflected:
+                raise CaseSourceUnavailable(
+                    "BFH search response did not reflect the submitted query; the search request may have been ignored or the form contract changed.",
+                    reason_code="BFH_SEARCH_RESPONSE_UNEXPECTED",
+                    diagnostics={"stage": "search_submission", "attempts": attempts},
+                )
+
+        raise CaseSourceNotFound(
+            "No exact BFH decision matched the supplied case number and decision date after the supported official search strategies.",
+            diagnostics={
+                "stage": "exact_match",
+                "case_number": case_number,
+                "decision_date": decision_date.isoformat() if decision_date else None,
+                "attempts": attempts,
+            },
+        )
 
     @staticmethod
     def _extract_case_metadata(text: str, fallback_date: date | None = None) -> tuple[str | None, str | None, str | None]:
@@ -348,12 +490,22 @@ class BFHCaseAdapter:
             return None
         hits = await self.search_exact_case(case_number, decision_date)
         if not hits:
+            # Defensive only: search_exact_case raises a diagnostic not-found for
+            # post-2010 searches and returns [] only for the pre-2010 short-circuit.
             return None
         hit = hits[0]
         try:
             document = await self.document_adapter.open_document(hit.canonical_url)
         except (OfficialDocumentNotFound, OfficialDocumentUnavailable) as exc:
-            raise CaseSourceUnavailable(str(exc)) from exc
+            raise CaseSourceUnavailable(
+                str(exc),
+                reason_code="BFH_CASE_DOCUMENT_OPEN_FAILED",
+                diagnostics={
+                    "stage": "document_open",
+                    "canonical_url": hit.canonical_url,
+                    "case_number": case_number,
+                },
+            ) from exc
         decision_type, parsed_date, ecli = self._extract_case_metadata(document.pages[0] if document.pages else "", decision_date)
         return RetrievedCase(
             court="BFH",

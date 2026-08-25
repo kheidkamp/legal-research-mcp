@@ -6,6 +6,7 @@ from datetime import date
 from .gesetze_im_internet import GesetzeImInternetAdapter, OfficialSourceNotFound, UpstreamUnavailable
 from .bfh_cases import (
     BFHCaseAdapter,
+    CaseSourceNotFound,
     CaseSourceUnavailable,
     UnsupportedCourt,
     normalize_case_number,
@@ -350,9 +351,26 @@ class LegalResearchService:
                 decision_date=date_value,
                 focus=focus,
             )
+        except CaseSourceNotFound as exc:
+            gate = self.case_adapter.blocked_gate(
+                exc.reason_code,
+                coverage,
+                retryable=False,
+            )
+            return envelope(
+                "not_found",
+                {
+                    "case": None,
+                    "input_reference": input_reference,
+                    "coverage_status": "partial",
+                    "content_gate": gate,
+                    "search_diagnostics": exc.diagnostics,
+                },
+                [str(exc), "Target-case content is locked because the official target decision was not opened."],
+            )
         except CaseSourceUnavailable as exc:
             gate = self.case_adapter.blocked_gate(
-                "OFFICIAL_CASE_SOURCE_UNAVAILABLE",
+                exc.reason_code,
                 coverage,
                 retryable=True,
             )
@@ -363,6 +381,7 @@ class LegalResearchService:
                     "input_reference": input_reference,
                     "coverage_status": "unknown",
                     "content_gate": gate,
+                    "search_diagnostics": exc.diagnostics,
                 },
                 [str(exc), "Target-case content is locked because the official target decision was not opened."],
             )
@@ -385,20 +404,21 @@ class LegalResearchService:
 
         if retrieved is None:
             gate = self.case_adapter.blocked_gate(
-                "TARGET_CASE_NOT_FOUND_IN_OFFICIAL_BFH_ONLINE_RESEARCH",
+                "OFFICIAL_CASE_RETRIEVAL_INDETERMINATE",
                 coverage,
-                retryable=False,
+                retryable=True,
             )
             return envelope(
-                "not_found",
+                "unavailable",
                 {
                     "case": None,
                     "input_reference": input_reference,
-                    "coverage_status": "partial",
+                    "coverage_status": "unknown",
                     "content_gate": gate,
+                    "search_diagnostics": {"stage": "retrieval", "detail": "adapter returned no case without a diagnostic exception"},
                 },
                 [
-                    "No exact official BFH online decision was opened for the supplied case reference.",
+                    "Official BFH case retrieval ended without a verified target document and without a definitive no-match result.",
                     "Do not infer target-case content from snippets, secondary sources, or model memory.",
                 ],
             )
