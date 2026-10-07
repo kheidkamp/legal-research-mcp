@@ -1,0 +1,6 @@
+Clean 0.3.4-dev and temporary SR03 diagnostic build must match for security-critical retrieval code.
+
+5d845f44cb93032b48bcaabe24e9a89743f79c7611ce402f5c5b28e1794cdf28  legal_mcp/network_security.py
+503f1ce18b912812d00ec92ee475126b92bb16b97e6cfbcec8e605c5ee681760  legal_mcp/official_documents.py
+cc3aba96280cab9c93ad2b41afa4e8d6ff93b8935b29073f57913c71a176dd6f  legal_mcp/gesetze_im_internet.py
+32cb5d6bcf9c4a13638f7eb2861a6cda8097fa2cb52db2ad90f68ad61e87f889  legal_mcp/bfh_cases.py
