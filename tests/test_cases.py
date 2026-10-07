@@ -55,7 +55,7 @@ async def test_pre_2010_case_closes_content_gate_without_fetch():
         focus='Anteilsveräußerung Ausschüttung Abwicklung Gestaltungsmissbrauch',
     )
     assert result['status'] == 'partial'
-    assert result['tool_version'] == '0.3.3-dev'
+    assert result['tool_version'] == '0.3.4-dev'
     gate = result['data']['content_gate']
     assert gate['gate_state'] == 'closed'
     assert gate['must_stop_target_case_content'] is True
