@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 from . import __version__
 from .models import sha256_text, stable_id
+from .network_security import assert_public_dns_for_url, media_type_allowed, normalized_media_type, validate_https_allowlisted_url
 from .registry import LawEntry
 
 
@@ -17,6 +19,18 @@ class UpstreamUnavailable(RuntimeError):
 
 class OfficialSourceNotFound(RuntimeError):
     pass
+
+
+class OfficialSourceTooLarge(UpstreamUnavailable):
+    pass
+
+
+class UnsupportedOfficialSource(UpstreamUnavailable):
+    pass
+
+
+_GII_HOSTS = {"www.gesetze-im-internet.de", "gesetze-im-internet.de"}
+_GII_MEDIA_TYPES = {"text/html", "application/xhtml+xml", "text/plain"}
 
 
 @dataclass
@@ -33,28 +47,83 @@ class GesetzeImInternetAdapter:
     """Read-only adapter for the official 'Gesetze im Internet' service.
 
     The service provides the current consolidated federal law. This MVP does not
-    infer historical validity from the current page.
+    infer historical validity from the current page. All outbound requests use
+    strict HTTPS/host validation, public-DNS checks, bounded redirects, timeouts,
+    response-size limits and content-type validation.
     """
 
-    def __init__(self, timeout_seconds: float = 15.0):
+    def __init__(
+        self,
+        timeout_seconds: float = 15.0,
+        max_bytes: int = 5 * 1024 * 1024,
+        max_redirects: int = 5,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.timeout_seconds = timeout_seconds
+        self.max_bytes = max_bytes
+        self.max_redirects = max_redirects
+        self.transport = transport
+
+    @staticmethod
+    def _validate_url(url: str) -> str:
+        return validate_https_allowlisted_url(
+            url,
+            _GII_HOSTS,
+            error_cls=UpstreamUnavailable,
+            label="Gesetze-im-Internet",
+        )
 
     async def _fetch(self, url: str) -> str:
         headers = {
             "User-Agent": f"LegalResearchMCP/{__version__} (+read-only legal research)",
-            "Accept": "text/html,application/xhtml+xml",
+            "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
         }
+        current = self._validate_url(url)
+        timeout = httpx.Timeout(self.timeout_seconds)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True, headers=headers) as client:
-                response = await client.get(url)
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=headers, transport=self.transport) as client:
+                for _ in range(self.max_redirects + 1):
+                    assert_public_dns_for_url(
+                        current,
+                        error_cls=UpstreamUnavailable,
+                        label="Gesetze-im-Internet",
+                    )
+                    async with client.stream("GET", current) as response:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location")
+                            if not location:
+                                raise UpstreamUnavailable("Official source returned a redirect without Location header.")
+                            current = self._validate_url(urljoin(current, location))
+                            continue
+                        if response.status_code == 404:
+                            raise OfficialSourceNotFound("Official source returned HTTP 404")
+                        if response.status_code >= 500:
+                            raise UpstreamUnavailable(f"Official source returned HTTP {response.status_code}")
+                        response.raise_for_status()
+
+                        content_length = response.headers.get("content-length")
+                        if content_length and content_length.isdigit() and int(content_length) > self.max_bytes:
+                            raise OfficialSourceTooLarge("Official source exceeds the configured response-size limit.")
+
+                        data = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            data.extend(chunk)
+                            if len(data) > self.max_bytes:
+                                raise OfficialSourceTooLarge("Official source exceeds the configured response-size limit.")
+
+                        media_type = normalized_media_type(response.headers.get("content-type"))
+                        if not media_type_allowed(media_type, _GII_MEDIA_TYPES):
+                            raise UnsupportedOfficialSource(
+                                f"Official source returned unsupported media type: {media_type or 'unknown'}"
+                            )
+                        self._validate_url(str(response.url))
+                        encoding = response.encoding or "utf-8"
+                        return bytes(data).decode(encoding, errors="replace")
+                raise UpstreamUnavailable("Official source exceeded the redirect limit.")
+        except (OfficialSourceNotFound, UpstreamUnavailable):
+            raise
         except httpx.HTTPError as exc:
             raise UpstreamUnavailable(f"Official source unavailable: {type(exc).__name__}") from exc
-        if response.status_code == 404:
-            raise OfficialSourceNotFound("Official source returned HTTP 404")
-        if response.status_code >= 500:
-            raise UpstreamUnavailable(f"Official source returned HTTP {response.status_code}")
-        response.raise_for_status()
-        return response.text
 
     @staticmethod
     def _visible_text(html: str) -> str:

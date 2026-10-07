@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 
 from . import __version__
 from .models import sha256_text, stable_id, today_iso
+from .network_security import assert_public_dns_for_url, media_type_allowed, normalized_media_type, validate_https_allowlisted_url
 from .official_documents import (
     OfficialDocumentAdapter,
     OfficialDocumentNotFound,
@@ -128,8 +129,14 @@ class BFHCaseAdapter:
         self,
         timeout_seconds: float = 20.0,
         document_adapter: OfficialDocumentAdapter | None = None,
+        max_bytes: int = 5 * 1024 * 1024,
+        max_redirects: int = 5,
+        transport: httpx.AsyncBaseTransport | None = None,
     ):
         self.timeout_seconds = timeout_seconds
+        self.max_bytes = max_bytes
+        self.max_redirects = max_redirects
+        self.transport = transport
         self.document_adapter = document_adapter or OfficialDocumentAdapter()
         # Preserve BFH cookies across landing-page and search submissions. Some
         # TYPO3/Extbase deployments bind form state to a browser session.
@@ -394,42 +401,66 @@ class BFHCaseAdapter:
 
     @staticmethod
     def _validate_bfh_url(url: str) -> str:
-        candidate = (url or "").strip()
-        parsed = urlparse(candidate)
-        if parsed.scheme.lower() != "https":
-            raise CaseSourceUnavailable("Only HTTPS BFH URLs are allowed.")
-        host = (parsed.hostname or "").lower().rstrip(".")
-        if host not in {_BFH_HOST, "bundesfinanzhof.de"}:
-            raise CaseSourceUnavailable("BFH request URL left the official BFH host allowlist.")
-        if parsed.username or parsed.password:
-            raise CaseSourceUnavailable("Credentials in BFH URLs are not allowed.")
-        if parsed.port not in (None, 443):
-            raise CaseSourceUnavailable("Non-standard HTTPS ports are not allowed for BFH retrieval.")
-        return candidate
+        return validate_https_allowlisted_url(
+            url,
+            {_BFH_HOST, "bundesfinanzhof.de"},
+            error_cls=CaseSourceUnavailable,
+            label="BFH",
+        )
 
     async def _fetch_html(self, url: str, params: dict[str, str] | None = None) -> tuple[str, str]:
         timeout = httpx.Timeout(self.timeout_seconds)
         current = self._validate_bfh_url(url)
+        allowed_media_types = {"text/html", "application/xhtml+xml", "text/plain"}
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=self._headers(), cookies=self._cookies) as client:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=self._headers(), cookies=self._cookies, transport=self.transport) as client:
                 first = True
-                for _ in range(6):
-                    response = await client.get(current, params=params if first else None)
-                    first = False
-                    if response.status_code in {301, 302, 303, 307, 308}:
-                        location = response.headers.get("location")
-                        if not location:
-                            raise CaseSourceUnavailable("BFH source returned a redirect without Location header.")
-                        current = self._validate_bfh_url(urljoin(current, location))
-                        continue
-                    if response.status_code == 404:
-                        raise CaseSourceNotFound("BFH source returned HTTP 404.")
-                    if response.status_code >= 500:
-                        raise CaseSourceUnavailable(f"BFH source returned HTTP {response.status_code}.")
-                    response.raise_for_status()
-                    final_url = self._validate_bfh_url(str(response.url))
-                    self._cookies.update(client.cookies)
-                    return response.text, final_url
+                for _ in range(self.max_redirects + 1):
+                    assert_public_dns_for_url(
+                        current,
+                        error_cls=CaseSourceUnavailable,
+                        label="BFH",
+                    )
+                    async with client.stream("GET", current, params=params if first else None) as response:
+                        first = False
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location")
+                            if not location:
+                                raise CaseSourceUnavailable("BFH source returned a redirect without Location header.")
+                            current = self._validate_bfh_url(urljoin(current, location))
+                            continue
+                        if response.status_code == 404:
+                            raise CaseSourceNotFound("BFH source returned HTTP 404.")
+                        if response.status_code >= 500:
+                            raise CaseSourceUnavailable(f"BFH source returned HTTP {response.status_code}.")
+                        response.raise_for_status()
+
+                        content_length = response.headers.get("content-length")
+                        if content_length and content_length.isdigit() and int(content_length) > self.max_bytes:
+                            raise CaseSourceUnavailable(
+                                "BFH source exceeds the configured response-size limit.",
+                                reason_code="BFH_RESPONSE_TOO_LARGE",
+                            )
+
+                        data = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            data.extend(chunk)
+                            if len(data) > self.max_bytes:
+                                raise CaseSourceUnavailable(
+                                    "BFH source exceeds the configured response-size limit.",
+                                    reason_code="BFH_RESPONSE_TOO_LARGE",
+                                )
+
+                        media_type = normalized_media_type(response.headers.get("content-type"))
+                        if not media_type_allowed(media_type, allowed_media_types):
+                            raise CaseSourceUnavailable(
+                                f"BFH source returned unsupported media type: {media_type or 'unknown'}",
+                                reason_code="BFH_CONTENT_TYPE_REJECTED",
+                            )
+                        final_url = self._validate_bfh_url(str(response.url))
+                        self._cookies.update(client.cookies)
+                        encoding = response.encoding or "utf-8"
+                        return bytes(data).decode(encoding, errors="replace"), final_url
                 raise CaseSourceUnavailable("BFH source exceeded the redirect limit.")
         except (CaseSourceNotFound, CaseSourceUnavailable):
             raise

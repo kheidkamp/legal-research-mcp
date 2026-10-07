@@ -11,6 +11,7 @@ from pypdf import PdfReader
 
 from . import __version__
 from .models import sha256_text
+from .network_security import assert_public_dns_for_url, media_type_allowed, normalized_media_type, validate_https_allowlisted_url
 
 
 class UnsafeOfficialDocumentUrl(ValueError):
@@ -71,24 +72,26 @@ class OfficialDocumentAdapter:
     followed manually and every hop is revalidated against the allowlist.
     """
 
-    def __init__(self, timeout_seconds: float = 20.0, max_bytes: int = 20 * 1024 * 1024):
+    def __init__(
+        self,
+        timeout_seconds: float = 20.0,
+        max_bytes: int = 20 * 1024 * 1024,
+        max_redirects: int = 5,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.timeout_seconds = timeout_seconds
         self.max_bytes = max_bytes
+        self.max_redirects = max_redirects
+        self.transport = transport
 
     @staticmethod
     def validate_official_url(url: str) -> str:
-        candidate = (url or "").strip()
-        parsed = urlparse(candidate)
-        if parsed.scheme.lower() != "https":
-            raise UnsafeOfficialDocumentUrl("Only HTTPS official-document URLs are allowed.")
-        host = (parsed.hostname or "").lower().rstrip(".")
-        if host not in OFFICIAL_HOSTS:
-            raise UnsafeOfficialDocumentUrl("URL host is not in the official-document allowlist.")
-        if parsed.username or parsed.password:
-            raise UnsafeOfficialDocumentUrl("Credentials in URLs are not allowed.")
-        if parsed.port not in (None, 443):
-            raise UnsafeOfficialDocumentUrl("Non-standard HTTPS ports are not allowed.")
-        return candidate
+        return validate_https_allowlisted_url(
+            url,
+            OFFICIAL_HOSTS,
+            error_cls=UnsafeOfficialDocumentUrl,
+            label="official-document",
+        )
 
     @staticmethod
     def resolve_document_id(document_id: str) -> str:
@@ -137,12 +140,18 @@ class OfficialDocumentAdapter:
         current = self.validate_official_url(url)
         headers = {
             "User-Agent": f"LegalResearchMCP/{__version__} (+read-only official document retrieval)",
-            "Accept": "application/pdf,text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+            "Accept": "application/pdf,text/html,application/xhtml+xml,text/plain;q=0.9",
         }
         timeout = httpx.Timeout(self.timeout_seconds)
+        allowed_media_types = {"application/pdf", "text/html", "application/xhtml+xml", "text/plain"}
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=headers) as client:
-                for _ in range(6):
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, headers=headers, transport=self.transport) as client:
+                for _ in range(self.max_redirects + 1):
+                    assert_public_dns_for_url(
+                        current,
+                        error_cls=UnsafeOfficialDocumentUrl,
+                        label="official-document",
+                    )
                     async with client.stream("GET", current) as response:
                         if response.status_code in {301, 302, 303, 307, 308}:
                             location = response.headers.get("location")
@@ -166,10 +175,23 @@ class OfficialDocumentAdapter:
                             if len(data) > self.max_bytes:
                                 raise OfficialDocumentTooLarge("Official document exceeds the configured download size limit.")
 
-                        media_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                        return bytes(data), media_type, str(response.url)
+                        payload = bytes(data)
+                        media_type = normalized_media_type(response.headers.get("content-type"))
+                        if not media_type_allowed(media_type, allowed_media_types):
+                            if not (payload.startswith(b"%PDF-") and media_type in {"", "application/octet-stream"}):
+                                raise UnsupportedOfficialDocument(
+                                    f"Unsupported official document media type: {media_type or 'unknown'}"
+                                )
+                        final_url = self.validate_official_url(str(response.url))
+                        return payload, media_type, final_url
                 raise OfficialDocumentUnavailable("Official source exceeded the redirect limit.")
-        except (OfficialDocumentNotFound, OfficialDocumentUnavailable, OfficialDocumentTooLarge, UnsafeOfficialDocumentUrl):
+        except (
+            OfficialDocumentNotFound,
+            OfficialDocumentUnavailable,
+            OfficialDocumentTooLarge,
+            UnsafeOfficialDocumentUrl,
+            UnsupportedOfficialDocument,
+        ):
             raise
         except httpx.HTTPError as exc:
             raise OfficialDocumentUnavailable(f"Official source unavailable: {type(exc).__name__}") from exc
@@ -248,7 +270,7 @@ class OfficialDocumentAdapter:
         data, media_type, final_url = await self._fetch_bytes(url)
         if media_type == "application/pdf" or data.startswith(b"%PDF-"):
             return self.parse_pdf(data, final_url)
-        if media_type in {"text/html", "application/xhtml+xml", "text/plain", ""}:
+        if media_type in {"text/html", "application/xhtml+xml", "text/plain"}:
             return self.parse_html(data, final_url, media_type)
         raise UnsupportedOfficialDocument(f"Unsupported official document media type: {media_type or 'unknown'}")
 
