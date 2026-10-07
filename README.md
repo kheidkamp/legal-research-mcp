@@ -1,6 +1,6 @@
-# Legal Research MCP 0.3.3-dev
+# Legal Research MCP 0.3.4-dev
 
-0.3.3-dev hardens positive BFH `get_case` retrieval by replaying the actual live decision-search form state using label-based semantic field discovery and preserved cookies. The target-case evidence gate remains fail-closed unless the official target decision is opened.
+0.3.4-dev adds production-oriented outbound research retrieval hardening across the official-document, Gesetze-im-Internet and BFH retrieval paths. It preserves the 0.3.3-dev case-evidence gate while making HTTPS-only transport, exact host allowlists, redirect-hop validation, public-DNS SSRF checks, response-size limits, bounded timeouts and content-type checks consistent across all live HTTP adapters.
 
 # Legal Research MCP MVP 0.3.2-dev - Render Free
 
