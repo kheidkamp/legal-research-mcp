@@ -16,3 +16,9 @@ Before production:
 10. Re-run the full v2.3.0 contract and regression suites before publication.
 
 Microsoft Entra ID can still be used as the OAuth identity provider even when the MCP application itself is hosted on Render; the hosting platform and identity provider do not have to be the same.
+
+## 0.3.4-dev outbound retrieval hardening status
+
+The DEV source now implements deterministic outbound controls for HTTPS-only retrieval, exact host allowlists, redirect-hop validation, public-DNS SSRF checks, response-size limits, timeouts and Content-Type validation across all current HTTP adapters. HTML/PDF parsing remains read-only and does not execute JavaScript.
+
+These implementation controls still require deployed live-runtime confirmation. They do not replace the separate production requirements for OAuth/Entra authentication, rate limiting/abuse protection, DLP, environment separation, secrets management, observability and final permission regression.
